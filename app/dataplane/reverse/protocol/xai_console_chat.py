@@ -34,7 +34,6 @@ import orjson
 
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
-from app.platform.config.snapshot import get_config
 
 
 # ---------------------------------------------------------------------------
