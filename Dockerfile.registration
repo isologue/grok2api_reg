@@ -1,0 +1,31 @@
+﻿# Local all-in-one image: Grok2API + the optional Chromium registration worker.
+# The upstream Dockerfile stays lean; use this image only when registration is needed.
+FROM python:3.13-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_PROJECT_ENVIRONMENT=/opt/venv
+ENV PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
+WORKDIR /app
+COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
+COPY pyproject.toml uv.lock requirements.registration.txt ./
+RUN uv sync --frozen --no-dev --no-install-project \
+    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.registration.txt
+
+FROM python:3.13-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TZ=Asia/Shanghai VIRTUAL_ENV=/opt/venv SERVER_HOST=0.0.0.0 SERVER_PORT=8000 SERVER_WORKERS=1
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tzdata chromium xvfb fonts-liberation wget \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+COPY pyproject.toml config.defaults.toml ./
+COPY app ./app
+COPY scripts ./scripts
+RUN mkdir -p /app/data /app/logs \
+    && sed -i 's/\r$//' /app/scripts/entrypoint.sh /app/scripts/init_storage.sh \
+    && chmod +x /app/scripts/entrypoint.sh /app/scripts/init_storage.sh
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 CMD ["sh", "-c", "wget -qO /dev/null http://127.0.0.1:${SERVER_PORT}/health || exit 1"]
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]
+CMD ["sh", "-c", "exec granian --interface asgi --host ${SERVER_HOST} --port ${SERVER_PORT} --workers ${SERVER_WORKERS} app.main:app"]
+

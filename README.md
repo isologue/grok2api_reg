@@ -457,3 +457,19 @@ curl http://localhost:8000/v1/chat/completions \
 **MIT License**
 
 </div>
+
+## 一体化账号注册机（Docker）
+
+需要在管理后台完成邮箱服务配置并自动导入账号池时，使用包含 Chromium 的本地一体化镜像：
+
+```bash
+docker compose -f docker-compose.warp.yml up -d --build
+```
+
+启动后进入 `http://localhost:8000/admin/register`，依次：
+
+1. 添加一个或多个 GptMail 兼容邮箱服务，填写 API 地址与 `X-API-Key`；
+2. 设置本次注册数量、导入账号池、标签和（可选）邮件/浏览器代理；
+3. 保存后点击“启动注册”。成功获取的 SSO 会调用当前服务内部的账号导入接口自动写入账户池。
+
+注册机的邮箱密钥、运行配置保存在 `data/registration/settings.json`，运行日志在 `logs/registration/`；这两个目录均由现有 Compose 数据卷持久化。默认 `docker-compose.yml` 保持为轻量上游镜像，不会附带浏览器依赖。

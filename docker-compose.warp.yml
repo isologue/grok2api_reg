@@ -1,4 +1,4 @@
-services:
+﻿services:
   # ── Init: 写入代理配置到 config.toml ──────────────────────────────────────
   init-config:
     image: python:3.13-alpine
@@ -43,7 +43,10 @@ services:
 
   # ── grok2api ──────────────────────────────────────────────────────────────
   grok2api:
-    image: ghcr.io/jiujiu532/grok2api:latest
+    # Registration needs Chromium, so build the local extended image.
+    build:
+      context: .
+      dockerfile: Dockerfile.registration
     container_name: grok2api
     restart: unless-stopped
     ports:
@@ -53,7 +56,10 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVER_HOST: ${SERVER_HOST:-0.0.0.0}
       SERVER_PORT: ${SERVER_PORT:-8000}
-      SERVER_WORKERS: ${SERVER_WORKERS:-1}
+      # Keep one worker so registration task state remains consistent.
+      SERVER_WORKERS: "1"
+      # Optional stable key for encrypted registration archives. Empty uses data/registration/archive.key.
+      REGISTRATION_ARCHIVE_KEY: ${REGISTRATION_ARCHIVE_KEY:-}
       ACCOUNT_STORAGE: ${ACCOUNT_STORAGE:-local}
       ACCOUNT_LOCAL_PATH: ${ACCOUNT_LOCAL_PATH:-data/accounts.db}
       ACCOUNT_REDIS_URL: ${ACCOUNT_REDIS_URL:-}
@@ -62,6 +68,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+    # Chromium needs extra shared memory inside the container.
+    shm_size: 1gb
     depends_on:
       init-config:
         condition: service_completed_successfully

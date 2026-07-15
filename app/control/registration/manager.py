@@ -1,0 +1,295 @@
+﻿"""Persistent settings and supervised child-process runtime for account registration."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import copy
+import json
+import os
+import re
+import sys
+import uuid
+from collections import deque
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from app.platform.paths import data_path, log_path
+
+_DEFAULT_SETTINGS: dict[str, Any] = {
+    "run": {
+        "count": 1,
+        "mailbox_attempts": 5,
+        "code_timeout_sec": 120,
+    },
+    "proxy": "",
+    "browser_proxy": "",
+    "account": {"pool": "basic", "tags": ["registered"]},
+    "mail": {"providers": []},
+}
+
+def _now() -> str:
+    return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
+
+
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", value)[:64] or "provider"
+
+
+class RegistrationManager:
+    """One supervised browser registration task per API process.
+
+    Settings are intentionally stored below DATA_DIR rather than in the general
+    config endpoint: mailbox secrets are excluded from generic configuration
+    reads and never returned unmasked by this API.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._process: asyncio.subprocess.Process | None = None
+        self._watch_task: asyncio.Task | None = None
+        self._lines: deque[str] = deque(maxlen=300)
+        self._runtime: dict[str, Any] = {
+            "state": "idle",
+            "task_id": "",
+            "started_at": None,
+            "finished_at": None,
+            "exit_code": None,
+            "message": "尚未启动注册任务",
+            "log_file": "",
+        }
+
+    @property
+    def _dir(self) -> Path:
+        path = data_path("registration")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def _settings_path(self) -> Path:
+        return self._dir / "settings.json"
+
+    def _read_settings_raw(self) -> dict[str, Any]:
+        if not self._settings_path.is_file():
+            return copy.deepcopy(_DEFAULT_SETTINGS)
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            return _deep_merge(_DEFAULT_SETTINGS, data if isinstance(data, dict) else {})
+        except (OSError, json.JSONDecodeError):
+            return copy.deepcopy(_DEFAULT_SETTINGS)
+
+    def get_settings(self) -> dict[str, Any]:
+        data = self._read_settings_raw()
+        providers = []
+        for item in (data.get("mail") or {}).get("providers") or []:
+            if not isinstance(item, dict):
+                continue
+            clone = dict(item)
+            secret = str(clone.pop("api_key", "") or "")
+            clone["api_key"] = ""
+            clone["api_key_configured"] = bool(secret)
+            providers.append(clone)
+        data.setdefault("mail", {})["providers"] = providers
+        return data
+
+    def save_settings(self, raw: dict[str, Any]) -> dict[str, Any]:
+        existing = self._read_settings_raw()
+        incoming = _deep_merge(_DEFAULT_SETTINGS, raw)
+        mail = incoming.setdefault("mail", {})
+        providers = mail.get("providers") or []
+        if not isinstance(providers, list):
+            raise ValueError("mail.providers 必须是数组")
+        old_by_id = {
+            str(item.get("id") or ""): item
+            for item in (existing.get("mail") or {}).get("providers") or []
+            if isinstance(item, dict)
+        }
+        normalized: list[dict[str, Any]] = []
+        for index, value in enumerate(providers):
+            if not isinstance(value, dict):
+                raise ValueError(f"第 {index + 1} 个邮箱服务格式无效")
+            item = dict(value)
+            item["id"] = _safe_name(str(item.get("id") or uuid.uuid4().hex[:10]))
+            item["type"] = str(item.get("type") or "gptmail").strip().lower()
+            default_name = "TempMail.lol" if item["type"] == "tempmail_lol" else "GptMail"
+            item["name"] = str(item.get("name") or f"{default_name} {index + 1}").strip()[:80]
+            item["enabled"] = bool(item.get("enabled", True))
+            # TempMail.lol bypasses the browser/WARP proxy by default.  This is
+            # persisted only when the provider explicitly opts into that proxy.
+            item["use_proxy"] = bool(item.get("use_proxy", False))
+            item["api_base"] = str(item.get("api_base") or "").strip().rstrip("/")
+            raw_domains = item.get("domains", item.get("domain", []))
+            if isinstance(raw_domains, str):
+                raw_domains = [part.strip() for part in raw_domains.split(",")]
+            item["domains"] = [str(domain).strip() for domain in (raw_domains or []) if str(domain).strip()]
+            item.pop("domain", None)
+            secret = str(item.get("api_key") or "").strip()
+            if not secret:
+                secret = str(old_by_id.get(item["id"], {}).get("api_key") or "")
+            item["api_key"] = secret
+            item.pop("api_key_configured", None)
+            if item["type"] not in {"gptmail", "tempmail_lol"}:
+                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol")
+            if item["type"] == "gptmail" and item["enabled"] and (not item["api_base"] or not item["api_key"]):
+                raise ValueError(f"GptMail provider {item['name']} requires an API base URL and API key")
+            normalized.append(item)
+        run = incoming.setdefault("run", {})
+        try:
+            run["count"] = int(run.get("count") or 1)
+            run["mailbox_attempts"] = int(run.get("mailbox_attempts") or 5)
+            run["code_timeout_sec"] = int(run.get("code_timeout_sec") or 120)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("注册数量、邮箱尝试次数和验证码等待时间必须为整数") from exc
+        if not 1 <= run["count"] <= 100:
+            raise ValueError("单次注册数量应在 1 到 100 之间")
+        if not 1 <= run["mailbox_attempts"] <= 10:
+            raise ValueError("单账号邮箱尝试次数应在 1 到 10 之间")
+        if not 30 <= run["code_timeout_sec"] <= 600:
+            raise ValueError("验证码等待时间应在 30 到 600 秒之间")
+        account = incoming.setdefault("account", {})
+        account["pool"] = str(account.get("pool") or "basic").strip().lower()
+        account["tags"] = [str(tag).strip() for tag in account.get("tags") or [] if str(tag).strip()]
+        incoming["proxy"] = str(incoming.get("proxy") or "").strip()
+        incoming["browser_proxy"] = str(incoming.get("browser_proxy") or "").strip()
+        mail["providers"] = normalized
+        self._settings_path.write_text(json.dumps(incoming, ensure_ascii=False, indent=2), encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(self._settings_path, 0o600)
+        return self.get_settings()
+
+    def status(self) -> dict[str, Any]:
+        state = dict(self._runtime)
+        state["running"] = state["state"] == "running"
+        state["lines"] = list(self._lines)
+        return state
+
+    async def start(self, *, admin_key: str, server_port: int) -> dict[str, Any]:
+        async with self._lock:
+            if self._process and self._process.returncode is None:
+                raise RuntimeError("已有注册任务正在运行")
+            settings = self._read_settings_raw()
+            providers = [p for p in (settings.get("mail") or {}).get("providers") or [] if p.get("enabled", True)]
+            if not providers:
+                raise RuntimeError("请先保存并启用至少一个邮箱服务")
+            invalid_gptmail = [
+                p for p in providers
+                if str(p.get("type") or "gptmail").strip().lower() == "gptmail"
+                and (not p.get("api_base") or not p.get("api_key"))
+            ]
+            if invalid_gptmail:
+                raise RuntimeError("Enabled GptMail providers require an API base URL and API key")
+
+
+            task_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+            run_dir = self._dir / "runs"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            payload = copy.deepcopy(settings)
+            payload["api"] = {
+                "endpoint": f"http://127.0.0.1:{server_port}/admin/api/registration/archive/import",
+                "token": admin_key,
+            }
+            config_path = run_dir / f"{task_id}.json"
+            config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(config_path, 0o600)
+
+            logs_dir = log_path("registration")
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_file = logs_dir / f"{task_id}.log"
+            self._lines.clear()
+            self._runtime = {
+                "state": "running", "task_id": task_id, "started_at": _now(), "finished_at": None,
+                "exit_code": None, "message": "浏览器注册任务正在运行", "log_file": str(log_file),
+            }
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-u", "-m", "app.control.registration.runner", "--config", str(config_path),
+                    cwd=str(Path(__file__).resolve().parents[3]),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            except Exception:
+                config_path.unlink(missing_ok=True)
+                raise
+            self._process = process
+            self._watch_task = asyncio.create_task(
+                self._watch_process(process, log_file, config_path), name=f"registration-{task_id}"
+            )
+            return self.status()
+
+    async def _watch_process(
+        self,
+        process: asyncio.subprocess.Process,
+        log_file: Path,
+        config_path: Path,
+    ) -> None:
+        if process.stdout is None:
+            config_path.unlink(missing_ok=True)
+            return
+        try:
+            with log_file.open("a", encoding="utf-8") as handle:
+                while line := await process.stdout.readline():
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if not text:
+                        continue
+                    self._lines.append(text)
+                    handle.write(f"{_now()} | {text}\n")
+                    handle.flush()
+            code = await process.wait()
+            if self._runtime.get("state") != "cancelled":
+                self._runtime.update({
+                    "state": "completed" if code == 0 else "failed",
+                    "finished_at": _now(), "exit_code": code,
+                    "message": "注册任务已完成" if code == 0 else f"注册任务异常退出（exit={code}）",
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._runtime.update({"state": "failed", "finished_at": _now(), "message": f"任务监控异常: {exc}"})
+        finally:
+            # The one-off payload contains mailbox credentials and the internal
+            # admin token used for automatic account-pool import.  The runner
+            # has already loaded it, so it must not remain in the persistent
+            # DATA_DIR after the task ends.
+            with contextlib.suppress(OSError):
+                config_path.unlink(missing_ok=True)
+            if self._process is process:
+                self._process = None
+            if self._watch_task is asyncio.current_task():
+                self._watch_task = None
+
+    async def stop(self) -> dict[str, Any]:
+        async with self._lock:
+            process = self._process
+            if not process or process.returncode is not None:
+                raise RuntimeError("当前没有正在运行的注册任务")
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=12)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+            self._runtime.update({"state": "cancelled", "finished_at": _now(), "exit_code": process.returncode, "message": "注册任务已停止"})
+            return self.status()
+
+    async def shutdown(self) -> None:
+        if self._process and self._process.returncode is None:
+            with contextlib.suppress(Exception):
+                await self.stop()
+        if self._watch_task:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watch_task
+
+
+__all__ = ["RegistrationManager"]

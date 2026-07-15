@@ -154,6 +154,11 @@ async def lifespan(app: FastAPI):
     app.state.repository = repo
     app.state.directory = directory
 
+    # Browser registration is isolated in a supervised child process so its
+    # DrissionPage/Chromium dependencies never block the API event loop.
+    from app.control.registration import RegistrationManager
+    app.state.registration_manager = RegistrationManager()
+
     # 3. Account directory sync loop — all workers, lightweight incremental pull.
     #    Keeps each worker's in-memory table eventually consistent with the repo.
     #
@@ -321,6 +326,10 @@ async def lifespan(app: FastAPI):
             await deleted_cleanup_task
         except asyncio.CancelledError:
             pass
+    registration_manager = getattr(app.state, "registration_manager", None)
+    if registration_manager is not None:
+        await registration_manager.shutdown()
+
     sync_task.cancel()
     try:
         await sync_task
