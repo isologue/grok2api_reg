@@ -1,4 +1,4 @@
-﻿"""Persistent settings and supervised child-process runtime for account registration."""
+"""Persistent settings and supervised child-process runtime for account registration."""
 
 from __future__ import annotations
 
@@ -27,6 +27,24 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "browser_proxy": "",
     "account": {"pool": "basic", "tags": ["registered"]},
     "mail": {"providers": []},
+    "cpa": {
+        "enabled": False,
+        "auth_dir": "",
+        "copy_to_hotload": False,
+        "hotload_dir": "",
+        "proxy": "",
+        "base_url": "https://cli-chat-proxy.grok.com/v1",
+        "prefer_protocol": True,
+        "protocol_only": False,
+        "protocol_poll_timeout_sec": 90,
+        "timeout_sec": 300,
+        "mint_gap_sec": 25,
+        "drain_timeout_sec": 600,
+        "probe_after_write": True,
+        "probe_chat": False,
+        "probe_required": False,
+        "mint_required": False,
+    },
 }
 
 def _now() -> str:
@@ -101,6 +119,11 @@ class RegistrationManager:
             clone["api_key_configured"] = bool(secret)
             providers.append(clone)
         data.setdefault("mail", {})["providers"] = providers
+        cpa = dict(data.get("cpa") or {})
+        cpa_proxy = str(cpa.pop("proxy", "") or "")
+        cpa["proxy"] = ""
+        cpa["proxy_configured"] = bool(cpa_proxy)
+        data["cpa"] = cpa
         return data
 
     def save_settings(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +180,36 @@ class RegistrationManager:
             raise ValueError("单账号邮箱尝试次数应在 1 到 10 之间")
         if not 30 <= run["code_timeout_sec"] <= 600:
             raise ValueError("验证码等待时间应在 30 到 600 秒之间")
+        cpa = incoming.setdefault("cpa", {})
+        cpa["enabled"] = bool(cpa.get("enabled", False))
+        cpa["copy_to_hotload"] = bool(cpa.get("copy_to_hotload", False))
+        cpa["prefer_protocol"] = bool(cpa.get("prefer_protocol", True))
+        cpa["protocol_only"] = bool(cpa.get("protocol_only", False))
+        cpa["probe_after_write"] = bool(cpa.get("probe_after_write", True))
+        cpa["probe_chat"] = bool(cpa.get("probe_chat", False))
+        cpa["probe_required"] = bool(cpa.get("probe_required", False))
+        cpa["mint_required"] = bool(cpa.get("mint_required", False))
+        for key, default in (("auth_dir", ""), ("hotload_dir", ""), ("base_url", "https://cli-chat-proxy.grok.com/v1")):
+            cpa[key] = str(cpa.get(key) or default).strip()
+        supplied_cpa_proxy = str(cpa.get("proxy") or "").strip()
+        if not supplied_cpa_proxy:
+            supplied_cpa_proxy = str((existing.get("cpa") or {}).get("proxy") or "").strip()
+        cpa["proxy"] = supplied_cpa_proxy
+        cpa.pop("proxy_configured", None)
+        try:
+            cpa["protocol_poll_timeout_sec"] = int(cpa.get("protocol_poll_timeout_sec") or 90)
+            cpa["timeout_sec"] = int(cpa.get("timeout_sec") or 300)
+            cpa["mint_gap_sec"] = float(cpa.get("mint_gap_sec") or 25)
+            cpa["drain_timeout_sec"] = int(cpa.get("drain_timeout_sec") or 600)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("CPA 协议轮询、mint 超时和间隔必须为数字") from exc
+        if not 30 <= cpa["protocol_poll_timeout_sec"] <= 600:
+            raise ValueError("CPA 协议轮询超时应在 30 到 600 秒之间")
+        if not 60 <= cpa["timeout_sec"] <= 900:
+            raise ValueError("CPA mint 超时应在 60 到 900 秒之间")
+        if not 0 <= cpa["mint_gap_sec"] <= 600:
+            raise ValueError("CPA mint 间隔应在 0 到 600 秒之间")
+
         account = incoming.setdefault("account", {})
         account["pool"] = str(account.get("pool") or "basic").strip().lower()
         account["tags"] = [str(tag).strip() for tag in account.get("tags") or [] if str(tag).strip()]

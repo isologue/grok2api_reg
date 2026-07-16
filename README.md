@@ -473,3 +473,20 @@ docker compose -f docker-compose.warp.yml up -d --build
 3. 保存后点击“启动注册”。成功获取的 SSO 会调用当前服务内部的账号导入接口自动写入账户池。
 
 注册机的邮箱密钥、运行配置保存在 `data/registration/settings.json`，运行日志在 `logs/registration/`；这两个目录均由现有 Compose 数据卷持久化。默认 `docker-compose.yml` 保持为轻量上游镜像，不会附带浏览器依赖。
+### CPA / OIDC 导出（CLIProxyAPI / Grok 4.5）
+
+注册机的“CPA / OIDC 导出”默认关闭；仅在你需要把**已成功注册并导入本账号池**的账号同步给兼容 CPA 格式的下游服务时启用。开启后，注册成功会先照常写入当前账号池，再在后台串行执行 SSO → OIDC mint，并生成：
+
+```text
+data/cpa_auths/xai-<email>.json
+```
+
+管理后台路径仍为 `http://localhost:8000/admin/register`。在 CPA 区块中可配置：
+
+- **OIDC 输出目录**：留空即使用 `data/cpa_auths`；容器内相对路径以 `/app/data` 为基准。
+- **CPA 专用代理**：留空时自动复用注册机的“浏览器代理”（其次复用全局 `proxy`），因此会继续经由你在 `docker-compose.warp.yml` 配置的 WARP / Privoxy 链路，不会自动回退直连。
+- **协议优先**：优先走 device-flow 协议；失败后才允许兼容的浏览器回退。勾选“仅协议”则不会回退浏览器。
+- **导出后检查 Grok 4.5**：只影响导出文件的可用性探测；除非启用“必须通过探测”，探测未列出模型只会作为警告，不会删除已生成文件。
+- **复制到热加载目录**：将同一份 `xai-<email>.json` 复制到下游服务正在监听的目录；`热加载目录` 必须填写为该下游服务在当前容器内可见的挂载路径。
+
+CPA/OIDC 文件与本项目账号池中保存的 SSO 认证是不同格式的认证产物，不能互相替代。`data/cpa_auths/`、热加载目录及 `data/registration/` 都应视为敏感数据：不要提交到 Git、不要通过日志或截图分享其内容，并限制宿主机目录访问权限。

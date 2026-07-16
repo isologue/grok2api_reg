@@ -1,4 +1,4 @@
-﻿"""Child-process Chromium workflow for the integrated registration console."""
+"""Child-process Chromium workflow for the integrated registration console."""
 from __future__ import annotations
 
 import argparse
@@ -13,8 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import requests
+
+from .console import install_console
+install_console()
 from DrissionPage import Chromium, ChromiumOptions
 
+from .cpa_queue import CpaExportQueue
 from .mail import MailboxPool, VerificationCodeTimeout
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
@@ -620,7 +624,7 @@ def import_registered_accounts(config: dict[str, Any], accounts: list[dict[str, 
     api = config.get("api") or {}
     endpoint, token = str(api.get("endpoint") or ""), str(api.get("token") or "")
     if not endpoint or not token:
-        raise RuntimeError("??????????")
+        raise RuntimeError("账号池导入接口未配置")
     payload = [
         {
             "token": str(item.get("sso") or ""),
@@ -641,7 +645,7 @@ def import_registered_accounts(config: dict[str, Any], accounts: list[dict[str, 
         response = requests.post(endpoint, headers=headers, json=payload, timeout=60)
     response.raise_for_status()
     data = response.json()
-    print(f"[import] ???????????????: {data.get('count', 0)} ?????: {data.get('skipped', 0)} ?", flush=True)
+    print(f"[import] 账号已导入账号池：新增 {data.get('count', 0)} 个，跳过 {data.get('skipped', 0)} 个", flush=True)
 
 
 def main() -> int:
@@ -657,6 +661,7 @@ def main() -> int:
     mailbox_attempts = int(run_settings.get("mailbox_attempts") or 5)
     code_timeout_sec = int(run_settings.get("code_timeout_sec") or 120)
     collected: list[dict[str, Any]] = []
+    cpa_queue = CpaExportQueue(config)
     try:
         worker.start()
         for current in range(1, count + 1):
@@ -667,6 +672,7 @@ def main() -> int:
                     code_timeout_sec=code_timeout_sec,
                 )
                 collected.append(result)
+                cpa_queue.submit(result, worker.page)
                 print(f"[run] 第 {current} 轮成功: {result['email']}", flush=True)
             except Exception as exc:
                 print(f"[run] 第 {current} 轮失败: {type(exc).__name__}: {exc}", flush=True)
@@ -674,6 +680,7 @@ def main() -> int:
                 worker.restart()
     finally:
         try:
+            cpa_queue.drain()
             import_registered_accounts(config, collected)
         finally:
             worker.close()
