@@ -174,6 +174,54 @@ class TempMailLolProvider(_MailboxProvider):
             raise RuntimeError(f"TempMail.lol {method} {path} returned a non-object payload")
         return data
 
+    def preflight(self) -> dict[str, int]:
+        """Validate each base Microsoft credential before a browser is started.
+
+        Only definitive OAuth grant failures are marked token_invalid. Network,
+        proxy and service errors remain retryable so a transient outage does not
+        discard otherwise usable credentials.
+        """
+        result = {"checked": 0, "available": 0, "invalid": 0, "transient": 0}
+        if not self.preflight_enabled:
+            return result
+        for credential in self._base_credentials:
+            result["checked"] += 1
+            context = json.dumps(credential, separators=(",", ":"))
+            try:
+                # list_messages follows the configured Graph/IMAP/auto mode and
+                # proves both refresh-token usability and actual mailbox access.
+                self.list_messages(credential["email"], context)
+            except OutlookTokenError as exc:
+                reason = str(exc)[:240]
+                expanded = expand_outlook_aliases([credential], self._entry)
+                with _OUTLOOK_STATE_LOCK:
+                    state = _read_outlook_state()
+                    for item in expanded:
+                        email = str(item.get("email") or "").lower()
+                        if email:
+                            state[email] = {"state": "token_invalid", "reason": reason, "updated_at": datetime.now(UTC).isoformat()}
+                    _write_outlook_state(state)
+                result["invalid"] += 1
+                print(f"[mail] Microsoft mailbox preflight invalid: {credential['email']} ({exc})", flush=True)
+            except Exception as exc:
+                result["transient"] += 1
+                print(f"[mail] Microsoft mailbox preflight deferred: {credential['email']} ({type(exc).__name__}: {exc})", flush=True)
+            else:
+                result["available"] += 1
+                # A successful re-check can recover an old invalid marker.
+                expanded = expand_outlook_aliases([credential], self._entry)
+                with _OUTLOOK_STATE_LOCK:
+                    state = _read_outlook_state()
+                    changed = False
+                    for item in expanded:
+                        email = str(item.get("email") or "").lower()
+                        if str((state.get(email) or {}).get("state") or "") in {"token_invalid", "login_required"}:
+                            state.pop(email, None)
+                            changed = True
+                    if changed:
+                        _write_outlook_state(state)
+        return result
+
     def create_mailbox(self) -> dict[str, str]:
         payload: dict[str, Any] = {}
         if self.domains:
@@ -461,6 +509,55 @@ class OutlookTokenProvider(_MailboxProvider):
             self.mode = "auto"
         self.imap_host = str(entry.get("imap_host") or OUTLOOK_DEFAULT_IMAP_HOST).strip() or OUTLOOK_DEFAULT_IMAP_HOST
         self.message_limit = _outlook_int(entry.get("message_limit"), 10, 1, 100)
+        self.preflight_enabled = _outlook_bool(entry.get("preflight_enabled"), True)
+
+    def preflight(self) -> dict[str, int]:
+        """Validate each base Microsoft credential before a browser is started.
+
+        Only definitive OAuth grant failures are marked token_invalid. Network,
+        proxy and service errors remain retryable so a transient outage does not
+        discard otherwise usable credentials.
+        """
+        result = {"checked": 0, "available": 0, "invalid": 0, "transient": 0}
+        if not self.preflight_enabled:
+            return result
+        for credential in self._base_credentials:
+            result["checked"] += 1
+            context = json.dumps(credential, separators=(",", ":"))
+            try:
+                # list_messages follows the configured Graph/IMAP/auto mode and
+                # proves both refresh-token usability and actual mailbox access.
+                self.list_messages(credential["email"], context)
+            except OutlookTokenError as exc:
+                reason = str(exc)[:240]
+                expanded = expand_outlook_aliases([credential], self._entry)
+                with _OUTLOOK_STATE_LOCK:
+                    state = _read_outlook_state()
+                    for item in expanded:
+                        email = str(item.get("email") or "").lower()
+                        if email:
+                            state[email] = {"state": "token_invalid", "reason": reason, "updated_at": datetime.now(UTC).isoformat()}
+                    _write_outlook_state(state)
+                result["invalid"] += 1
+                print(f"[mail] Microsoft mailbox preflight invalid: {credential['email']} ({exc})", flush=True)
+            except Exception as exc:
+                result["transient"] += 1
+                print(f"[mail] Microsoft mailbox preflight deferred: {credential['email']} ({type(exc).__name__}: {exc})", flush=True)
+            else:
+                result["available"] += 1
+                # A successful re-check can recover an old invalid marker.
+                expanded = expand_outlook_aliases([credential], self._entry)
+                with _OUTLOOK_STATE_LOCK:
+                    state = _read_outlook_state()
+                    changed = False
+                    for item in expanded:
+                        email = str(item.get("email") or "").lower()
+                        if str((state.get(email) or {}).get("state") or "") in {"token_invalid", "login_required"}:
+                            state.pop(email, None)
+                            changed = True
+                    if changed:
+                        _write_outlook_state(state)
+        return result
 
     def create_mailbox(self) -> dict[str, str]:
         with _OUTLOOK_STATE_LOCK:
@@ -625,6 +722,18 @@ class MailboxPool:
         if unsupported:
             raise RuntimeError(f"Unsupported mailbox provider types: {', '.join(unsupported)}")
         self._cursor = random.randrange(len(self._providers))
+
+    def preflight(self) -> dict[str, int]:
+        """Run optional provider self-tests before the browser registration flow."""
+        total = {"checked": 0, "available": 0, "invalid": 0, "transient": 0}
+        for provider in self._providers:
+            checker = getattr(provider, "preflight", None)
+            if not callable(checker):
+                continue
+            outcome = checker()
+            for key in total:
+                total[key] += int(outcome.get(key) or 0)
+        return total
 
     def acquire(self) -> Mailbox:
         errors: list[str] = []

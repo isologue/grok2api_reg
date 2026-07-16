@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.control.registration.mail import (
-    MailboxPool, MailboxRateLimited, TempMailLolProvider, expand_outlook_aliases,
+    MailboxPool, MailboxRateLimited, OutlookTokenError, OutlookTokenProvider, TempMailLolProvider, expand_outlook_aliases,
     extract_verification_code, outlook_pool_stats, parse_outlook_credentials,
     remove_outlook_invalid_credentials, reset_outlook_pool_state,
 )
@@ -61,6 +61,28 @@ class TempMailLolProviderTests(unittest.TestCase):
         content = "<style>.email { TEXT-SIZE: 14px; }</style><p>Your code is ABC-123</p>"
         self.assertEqual(extract_verification_code(content), "ABC-123")
         self.assertIsNone(extract_verification_code("<style>.email { TEXT-SIZE: 14px; }</style>"))
+
+
+class OutlookPreflightTests(unittest.TestCase):
+    def test_preflight_marks_only_definitive_token_failures_invalid(self) -> None:
+        entry = {"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "alias_enabled": True, "alias_per_email": 1, "preflight_enabled": True}
+        provider = OutlookTokenProvider(entry)
+        provider.list_messages = Mock(side_effect=OutlookTokenError("Microsoft token refresh failed: HTTP 400 (invalid_grant AADSTS70000)"))
+        with tempfile.TemporaryDirectory() as tmp, patch("app.control.registration.mail._outlook_state_path", return_value=Path(tmp) / "outlook.json"):
+            outcome = provider.preflight()
+            from app.control.registration import mail
+            state = mail._read_outlook_state()
+            self.assertEqual(outcome, {"checked": 1, "available": 0, "invalid": 1, "transient": 0})
+            self.assertEqual(state["owner@outlook.com"]["state"], "token_invalid")
+            self.assertEqual(state["owner+c2api1@outlook.com"]["state"], "token_invalid")
+        provider.close()
+
+    def test_preflight_can_be_disabled_for_a_provider(self) -> None:
+        provider = OutlookTokenProvider({"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "preflight_enabled": False})
+        provider.list_messages = Mock()
+        self.assertEqual(provider.preflight(), {"checked": 0, "available": 0, "invalid": 0, "transient": 0})
+        provider.list_messages.assert_not_called()
+        provider.close()
 
 
 class RegistrationMailboxSettingsTests(unittest.TestCase):

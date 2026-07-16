@@ -105,6 +105,17 @@ class BrowserRegistration:
         self._close_browser()
         self._start_browser()
 
+    def preflight_mailboxes(self) -> None:
+        providers = (self.config.get("mail") or {}).get("providers") or []
+        enabled_outlook = [item for item in providers if isinstance(item, dict) and item.get("enabled", True) and str(item.get("type") or "").lower() == "outlook_token" and bool(item.get("preflight_enabled", True))]
+        if not enabled_outlook:
+            return
+        print("[mail] starting Microsoft mailbox preflight before browser startup", flush=True)
+        result = self.mail_pool.preflight()
+        print(f"[mail] Microsoft mailbox preflight completed: checked {result['checked']}, available {result['available']}, invalid {result['invalid']}, deferred {result['transient']}", flush=True)
+        if result["checked"] and not result["available"] and not result["transient"]:
+            raise RuntimeError("No usable Microsoft mailbox credentials remain after preflight")
+
     def close(self) -> None:
         self._close_browser()
         self.mail_pool.close()
@@ -667,6 +678,7 @@ def main() -> int:
     collected: list[dict[str, Any]] = []
     cpa_queue = CpaExportQueue(config)
     try:
+        worker.preflight_mailboxes()
         worker.start()
         for current in range(1, count + 1):
             print(f"[run] 开始第 {current}/{count} 轮注册", flush=True)

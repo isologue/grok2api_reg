@@ -206,8 +206,9 @@ class RegistrationManager:
                 item["alias_enabled"] = bool(item.get("alias_enabled", False))
                 item["alias_include_original"] = bool(item.get("alias_include_original", True))
                 item["alias_prefix"] = re.sub(r"[^A-Za-z0-9._-]+", "", str(item.get("alias_prefix") or "c2api").strip()) or "c2api"
+                item["preflight_enabled"] = bool(item.get("preflight_enabled", True))
             else:
-                for field in ("mode", "imap_host", "message_limit", "alias_enabled", "alias_per_email", "alias_prefix", "alias_include_original"):
+                for field in ("mode", "imap_host", "message_limit", "alias_enabled", "alias_per_email", "alias_prefix", "alias_include_original", "preflight_enabled"):
                     item.pop(field, None)
             if item["type"] == "gptmail" and item["enabled"] and (not item["api_base"] or not item["api_key"]):
                 raise ValueError(f"GptMail provider {item['name']} requires an API base URL and API key")
