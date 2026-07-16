@@ -100,6 +100,7 @@ class RegistrationMailboxSettingsTests(unittest.TestCase):
             })
             provider = settings["mail"]["providers"][0]
             self.assertEqual(provider["type"], "tempmail_lol")
+            self.assertEqual(provider["api_base"], "https://api.tempmail.lol/v2")
             self.assertEqual(provider["domains"], ["example.test"])
             self.assertNotIn("use_proxy", provider)
 

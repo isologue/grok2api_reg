@@ -163,6 +163,16 @@ class RegistrationManager:
             # All mailbox APIs share the configured mailbox API proxy.
             item.pop("use_proxy", None)
             item["api_base"] = str(item.get("api_base") or "").strip().rstrip("/")
+            # A provider card can be switched from GptMail to TempMail.lol. Do
+            # not carry GptMail's endpoint into TempMail.lol, whose official
+            # endpoint is used automatically when this field is blank.
+            if item["type"] == "tempmail_lol":
+                if "mail.chatgpt.org.uk" in item["api_base"].lower():
+                    item["api_base"] = ""
+                # Persist the official endpoint so the UI always shows the
+                # effective default while still allowing a compatible custom URL.
+                if not item["api_base"]:
+                    item["api_base"] = "https://api.tempmail.lol/v2"
             raw_domains = item.get("domains", item.get("domain", []))
             if isinstance(raw_domains, str):
                 raw_domains = [part.strip() for part in raw_domains.split(",")]

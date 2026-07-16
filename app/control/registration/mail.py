@@ -168,59 +168,13 @@ class TempMailLolProvider(_MailboxProvider):
                 self._inbox_cooldown_until = max(self._inbox_cooldown_until, time.monotonic() + retry_after)
             raise MailboxRateLimited(self.name, retry_after)
         if response.status_code not in expected:
-            raise RuntimeError(f"TempMail.lol request failed: {method} {path}, HTTP {response.status_code}")
+            body = str(getattr(response, "text", "") or "").replace("\n", " ").strip()[:240]
+            endpoint = f"{self.base_url}{path}"
+            raise RuntimeError(f"TempMail.lol request failed: {method} {endpoint}, HTTP {response.status_code}{f', body={body}' if body else ''}")
         data = response.json()
         if not isinstance(data, dict):
             raise RuntimeError(f"TempMail.lol {method} {path} returned a non-object payload")
         return data
-
-    def preflight(self) -> dict[str, int]:
-        """Validate each base Microsoft credential before a browser is started.
-
-        Only definitive OAuth grant failures are marked token_invalid. Network,
-        proxy and service errors remain retryable so a transient outage does not
-        discard otherwise usable credentials.
-        """
-        result = {"checked": 0, "available": 0, "invalid": 0, "transient": 0}
-        if not self.preflight_enabled:
-            return result
-        for credential in self._base_credentials:
-            result["checked"] += 1
-            context = json.dumps(credential, separators=(",", ":"))
-            try:
-                # list_messages follows the configured Graph/IMAP/auto mode and
-                # proves both refresh-token usability and actual mailbox access.
-                self.list_messages(credential["email"], context)
-            except OutlookTokenError as exc:
-                reason = str(exc)[:240]
-                expanded = expand_outlook_aliases([credential], self._entry)
-                with _OUTLOOK_STATE_LOCK:
-                    state = _read_outlook_state()
-                    for item in expanded:
-                        email = str(item.get("email") or "").lower()
-                        if email:
-                            state[email] = {"state": "token_invalid", "reason": reason, "updated_at": datetime.now(UTC).isoformat()}
-                    _write_outlook_state(state)
-                result["invalid"] += 1
-                print(f"[mail] Microsoft mailbox preflight invalid: {credential['email']} ({exc})", flush=True)
-            except Exception as exc:
-                result["transient"] += 1
-                print(f"[mail] Microsoft mailbox preflight deferred: {credential['email']} ({type(exc).__name__}: {exc})", flush=True)
-            else:
-                result["available"] += 1
-                # A successful re-check can recover an old invalid marker.
-                expanded = expand_outlook_aliases([credential], self._entry)
-                with _OUTLOOK_STATE_LOCK:
-                    state = _read_outlook_state()
-                    changed = False
-                    for item in expanded:
-                        email = str(item.get("email") or "").lower()
-                        if str((state.get(email) or {}).get("state") or "") in {"token_invalid", "login_required"}:
-                            state.pop(email, None)
-                            changed = True
-                    if changed:
-                        _write_outlook_state(state)
-        return result
 
     def create_mailbox(self) -> dict[str, str]:
         payload: dict[str, Any] = {}
