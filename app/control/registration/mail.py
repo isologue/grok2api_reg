@@ -1,8 +1,14 @@
-﻿"""Mailbox providers used by the integrated browser registration worker."""
+"""Mailbox providers used by the integrated browser registration worker."""
 from __future__ import annotations
 
+import imaplib
 import json
 import random
+import threading
+from email import message_from_bytes, policy
+from email.header import decode_header, make_header
+from email.utils import parsedate_to_datetime
+from datetime import UTC, datetime
 import re
 import secrets
 import time
@@ -15,6 +21,8 @@ except ImportError:  # pragma: no cover - Docker image supplies curl_cffi
     curl_requests = None
 
 import requests
+
+from app.platform.paths import data_path
 
 
 class VerificationCodeTimeout(RuntimeError):
@@ -122,11 +130,8 @@ class TempMailLolProvider(_MailboxProvider):
         if isinstance(raw_domains, str):
             raw_domains = [part.strip() for part in raw_domains.split(",")]
         self.domains = [str(item).strip() for item in (raw_domains or []) if str(item).strip()]
-        # Browser traffic needs the configured WARP/Privoxy route for xAI, but
-        # TempMail.lol can rate-limit that shared egress IP.  Keep mailbox API
-        # requests direct by default; an explicit provider setting can opt in.
-        self.use_proxy = bool(entry.get("use_proxy", False))
-        self.session = _create_session(proxy if self.use_proxy else "")
+        # All mailbox providers consistently use the configured mailbox API proxy.
+        self.session = _create_session(proxy)
         # TempMail.lol limits polling more aggressively than GptMail.  Keep this
         # conservative even before a 429 is observed.
         self.poll_interval_seconds = 10.0
@@ -213,12 +218,401 @@ class TempMailLolProvider(_MailboxProvider):
         self.session.close()
 
 
+OUTLOOK_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+OUTLOOK_GRAPH_MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/messages"
+OUTLOOK_GRAPH_SCOPE = "offline_access https://graph.microsoft.com/Mail.Read"
+OUTLOOK_IMAP_SCOPE = "offline_access https://outlook.office.com/IMAP.AccessAsUser.All"
+OUTLOOK_DEFAULT_IMAP_HOST = "outlook.office365.com"
+OUTLOOK_IN_USE_STALE_SECONDS = 3600
+_OUTLOOK_STATE_LOCK = threading.Lock()
+
+
+def parse_outlook_credentials(value: str) -> list[dict[str, str]]:
+    """Parse one credential per line: email----password----client_id----refresh_token."""
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in str(value or "").splitlines():
+        parts = [part.strip().replace("\ufeff", "") for part in raw.split("----", 3)]
+        if len(parts) != 4:
+            continue
+        email, password, client_id, refresh_token = parts
+        key = email.lower()
+        if "@" not in email or not client_id or not refresh_token or key in seen:
+            continue
+        seen.add(key)
+        result.append({"email": email, "password": password, "client_id": client_id, "refresh_token": refresh_token})
+    return result
+
+
+def _outlook_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _outlook_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(maximum, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def outlook_alias_supported(email: str) -> bool:
+    domain = str(email or "").strip().lower().partition("@")[2]
+    return domain in {"outlook.com", "hotmail.com", "live.com", "msn.com", "outlook.cn", "hotmail.co.uk"}
+
+
+def outlook_alias_address(email: str, tag: str) -> str:
+    local, sep, domain = str(email or "").strip().partition("@")
+    if not sep:
+        return email
+    return f"{local.split('+', 1)[0]}+{tag}@{domain}"
+
+
+def expand_outlook_aliases(credentials: list[dict[str, str]], entry: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    source = entry or {}
+    enabled = _outlook_bool(source.get("alias_enabled"), False)
+    per_email = _outlook_int(source.get("alias_per_email"), 0, 0, 200)
+    include_original = _outlook_bool(source.get("alias_include_original"), True)
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "", str(source.get("alias_prefix") or "c2api").strip()) or "c2api"
+    if not enabled or per_email <= 0:
+        return [dict(item) for item in credentials]
+    expanded: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for credential in credentials:
+        original = str(credential.get("email") or "").strip()
+        if include_original and original and original.lower() not in seen:
+            expanded.append(dict(credential))
+            seen.add(original.lower())
+        if not outlook_alias_supported(original):
+            continue
+        for index in range(1, per_email + 1):
+            alias = outlook_alias_address(original, f"{prefix}{index}")
+            if alias.lower() in seen:
+                continue
+            expanded.append({**credential, "email": alias, "login_email": original, "alias_of": original})
+            seen.add(alias.lower())
+    return expanded
+
+
+def _outlook_state_path():
+    return data_path("registration/outlook_mailbox_states.json")
+
+
+def _read_outlook_state() -> dict[str, dict[str, str]]:
+    try:
+        value = json.loads(_outlook_state_path().read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_outlook_state(state: dict[str, dict[str, str]]) -> None:
+    path = _outlook_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({key: state[key] for key in sorted(state)}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _outlook_available(state: dict[str, dict[str, str]], email: str) -> bool:
+    entry = state.get(email.lower())
+    if not isinstance(entry, dict):
+        return True
+    current = str(entry.get("state") or "")
+    if current == "in_use":
+        try:
+            updated = datetime.fromisoformat(str(entry.get("updated_at") or ""))
+            return (datetime.now(UTC) - updated).total_seconds() >= OUTLOOK_IN_USE_STALE_SECONDS
+        except ValueError:
+            return False
+    return current not in {"used", "failed", "login_required", "token_invalid"}
+
+
+def outlook_pool_stats(credentials: list[dict[str, str]], entry: dict[str, Any] | None = None) -> dict[str, int]:
+    pool = expand_outlook_aliases(credentials, entry)
+    with _OUTLOOK_STATE_LOCK:
+        state = _read_outlook_state()
+    counts = {"available": 0, "in_use": 0, "used": 0, "failed": 0, "login_required": 0, "token_invalid": 0}
+    for item in pool:
+        email = str(item.get("email") or "").lower()
+        status = str((state.get(email) or {}).get("state") or "available")
+        if status == "in_use" and _outlook_available(state, email):
+            status = "available"
+        if status not in counts:
+            status = "available"
+        counts[status] += 1
+    counts["retryable"] = counts["failed"]
+    counts["invalid"] = counts["login_required"] + counts["token_invalid"]
+    counts["abnormal"] = counts["retryable"] + counts["invalid"]
+    counts["saved"] = len(pool)
+    return counts
+
+
+def outlook_pool_entries(credentials: list[dict[str, str]], entry: dict[str, Any] | None = None, status: str = "all") -> list[dict[str, str]]:
+    """Return safe, secret-free mailbox rows for the admin pool detail dialog."""
+    requested = str(status or "all").strip().lower()
+    aliases = {"retryable": {"failed"}, "invalid": {"login_required", "token_invalid"}, "all": None}
+    with _OUTLOOK_STATE_LOCK:
+        state_store = _read_outlook_state()
+    rows: list[dict[str, str]] = []
+    for item in expand_outlook_aliases(credentials, entry):
+        email = str(item.get("email") or "").strip()
+        state_item = state_store.get(email.lower()) or {}
+        current = str(state_item.get("state") or "available")
+        if current == "in_use" and _outlook_available(state_store, email):
+            current = "available"
+        wanted = aliases.get(requested, {requested})
+        if wanted is not None and current not in wanted:
+            continue
+        rows.append({
+            "email": email,
+            "login_email": str(item.get("login_email") or item.get("alias_of") or email),
+            "alias_of": str(item.get("alias_of") or ""),
+            "state": current,
+            "reason": str(state_item.get("reason") or "")[:240],
+            "updated_at": str(state_item.get("updated_at") or ""),
+        })
+    return rows
+
+
+def remove_outlook_invalid_credentials(credentials: list[dict[str, str]], entry: dict[str, Any] | None = None) -> tuple[list[dict[str, str]], int]:
+    """Remove base credentials whose original address or aliases are permanently invalid."""
+    with _OUTLOOK_STATE_LOCK:
+        state_store = _read_outlook_state()
+        invalid = {"login_required", "token_invalid"}
+        kept: list[dict[str, str]] = []
+        removed_pool_addresses: set[str] = set()
+        removed = 0
+        for credential in credentials:
+            expanded = expand_outlook_aliases([credential], entry)
+            if any(str((state_store.get(str(item.get("email") or "").lower()) or {}).get("state") or "") in invalid for item in expanded):
+                removed += 1
+                removed_pool_addresses.update(str(item.get("email") or "").lower() for item in expanded)
+            else:
+                kept.append(credential)
+        for email in removed_pool_addresses:
+            state_store.pop(email, None)
+        if removed_pool_addresses:
+            _write_outlook_state(state_store)
+    return kept, removed
+
+
+def prune_outlook_unused_credentials(credentials: list[dict[str, str]], entry: dict[str, Any] | None = None) -> tuple[list[dict[str, str]], int]:
+    """Keep base credentials that have a recorded outcome; remove never-used ones."""
+    with _OUTLOOK_STATE_LOCK:
+        state = _read_outlook_state()
+    recorded = {"in_use", "used", "failed", "login_required", "token_invalid"}
+    kept: list[dict[str, str]] = []
+    removed = 0
+    for credential in credentials:
+        expanded = expand_outlook_aliases([credential], entry)
+        if any(str((state.get(str(item.get("email") or "").lower()) or {}).get("state") or "") in recorded for item in expanded):
+            kept.append(credential)
+        else:
+            removed += 1
+    return kept, removed
+
+
+def reset_outlook_pool_state(scope: str = "all") -> int:
+    scope = str(scope or "all").strip().lower()
+    targets = {
+        "retryable": {"in_use", "failed"},
+        "invalid": {"login_required", "token_invalid"},
+        "busy": {"in_use"},
+        "used": {"used"},
+    }.get(scope)
+    with _OUTLOOK_STATE_LOCK:
+        state = _read_outlook_state()
+        if targets is None:
+            removed = len(state)
+            _write_outlook_state({})
+            return removed
+        remove = [key for key, value in state.items() if str(value.get("state") or "") in targets]
+        for key in remove:
+            state.pop(key, None)
+        if remove:
+            _write_outlook_state(state)
+        return len(remove)
+
+
+class OutlookTokenError(RuntimeError):
+    pass
+
+
+class OutlookTokenProvider(_MailboxProvider):
+    """Microsoft credential pool with Graph API, IMAP and Outlook plus-alias support."""
+
+    name = "Microsoft ?????"
+    poll_interval_seconds = 5.0
+
+    def __init__(self, entry: dict[str, Any], proxy: str = "") -> None:
+        self.name = str(entry.get("name") or self.name)
+        self._entry = dict(entry)
+        self._base_credentials = parse_outlook_credentials(str(entry.get("mailboxes") or ""))
+        self._pool = expand_outlook_aliases(self._base_credentials, entry)
+        if not self._pool:
+            raise RuntimeError("Microsoft credential pool is empty or invalid")
+        self._cursor = random.randrange(len(self._pool))
+        self._session = _create_session(proxy)
+        self._token_cache: dict[tuple[str, str], tuple[str, float]] = {}
+        self.mode = str(entry.get("mode") or "auto").strip().lower()
+        if self.mode not in {"graph", "imap", "auto"}:
+            self.mode = "auto"
+        self.imap_host = str(entry.get("imap_host") or OUTLOOK_DEFAULT_IMAP_HOST).strip() or OUTLOOK_DEFAULT_IMAP_HOST
+        self.message_limit = _outlook_int(entry.get("message_limit"), 10, 1, 100)
+
+    def create_mailbox(self) -> dict[str, str]:
+        with _OUTLOOK_STATE_LOCK:
+            state = _read_outlook_state()
+            selected_index = next((index for index in ((self._cursor + offset) % len(self._pool) for offset in range(len(self._pool))) if _outlook_available(state, self._pool[index]["email"])), None)
+            if selected_index is None:
+                raise RuntimeError("Microsoft credential pool has no available mailbox")
+            selected = self._pool[selected_index]
+            self._cursor = (selected_index + 1) % len(self._pool)
+            state[selected["email"].lower()] = {"state": "in_use", "reason": "", "updated_at": datetime.now(UTC).isoformat()}
+            _write_outlook_state(state)
+        return {"address": selected["email"], "token": json.dumps(selected, separators=(",", ":"))}
+
+    @staticmethod
+    def _credentials(token: str) -> dict[str, str]:
+        try:
+            value = json.loads(token)
+        except json.JSONDecodeError as exc:
+            raise OutlookTokenError("Microsoft credential context was lost") from exc
+        if not isinstance(value, dict):
+            raise OutlookTokenError("Microsoft credential context was lost")
+        result = {key: str(value.get(key) or "").strip() for key in ("email", "client_id", "refresh_token", "login_email")}
+        result["password"] = str(value.get("password") or "")
+        if not result["email"] or not result["client_id"] or not result["refresh_token"]:
+            raise OutlookTokenError("Microsoft credential is missing client_id or refresh_token")
+        result["login_email"] = result["login_email"] or result["email"]
+        return result
+
+    def _access_token(self, credential: dict[str, str], scope: str) -> str:
+        key = (credential["email"].lower(), scope)
+        cached = self._token_cache.get(key)
+        if cached and time.monotonic() < cached[1]:
+            return cached[0]
+        response = self._session.post(OUTLOOK_TOKEN_URL, data={"client_id": credential["client_id"], "grant_type": "refresh_token", "refresh_token": credential["refresh_token"], "scope": scope}, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30, verify=False)
+        if response.status_code != 200:
+            try:
+                body = response.json() or {}
+            except Exception:
+                body = {}
+            error = str(body.get("error") or "").strip()
+            description = str(body.get("error_description") or "").replace("\n", " ").strip()
+            aadsts = re.search(r"AADSTS\d+", description, flags=re.IGNORECASE)
+            detail = " ".join(part for part in (error, aadsts.group(0).upper() if aadsts else "") if part)
+            raise OutlookTokenError(f"Microsoft token refresh failed: HTTP {response.status_code}{f' ({detail})' if detail else ''}")
+        token = str((response.json() or {}).get("access_token") or "").strip()
+        if not token:
+            raise OutlookTokenError("Microsoft token refresh returned no access_token")
+        self._token_cache[key] = (token, time.monotonic() + 600)
+        return token
+
+    def _graph_messages(self, credential: dict[str, str]) -> list[dict[str, Any]]:
+        token = self._access_token(credential, OUTLOOK_GRAPH_SCOPE)
+        response = self._session.get(OUTLOOK_GRAPH_MESSAGES_URL, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "id,subject,body,bodyPreview"}, timeout=30, verify=False)
+        if response.status_code != 200:
+            raise RuntimeError(f"Microsoft Graph mailbox request failed: HTTP {response.status_code}")
+        payload = response.json() or {}
+        result: list[dict[str, Any]] = []
+        for item in payload.get("value", []) if isinstance(payload, dict) else []:
+            if isinstance(item, dict):
+                body = item.get("body") if isinstance(item.get("body"), dict) else {}
+                result.append({"id": str(item.get("id") or ""), "subject": str(item.get("subject") or ""), "content": str(body.get("content") or item.get("bodyPreview") or "")})
+        return result
+
+    @staticmethod
+    def _decode_header(value: str) -> str:
+        try:
+            return str(make_header(decode_header(value)))
+        except Exception:
+            return value
+
+    def _imap_messages(self, credential: dict[str, str]) -> list[dict[str, Any]]:
+        token = self._access_token(credential, OUTLOOK_IMAP_SCOPE)
+        auth = f"user={credential['login_email']}\x01auth=Bearer {token}\x01\x01"
+        client = imaplib.IMAP4_SSL(self.imap_host)
+        try:
+            client.authenticate("XOAUTH2", lambda _: auth.encode("utf-8"))
+            status, _ = client.select("INBOX", readonly=True)
+            if status != "OK":
+                raise RuntimeError("Microsoft IMAP cannot select INBOX")
+            status, data = client.uid("search", None, "ALL")
+            if status != "OK" or not data or not data[0]:
+                return []
+            result: list[dict[str, Any]] = []
+            for uid in reversed(data[0].split()[-self.message_limit:]):
+                status, fetched = client.uid("fetch", uid, "(RFC822)")
+                if status != "OK":
+                    continue
+                raw = next((part[1] for part in fetched if isinstance(part, tuple) and isinstance(part[1], bytes)), b"")
+                if not raw:
+                    continue
+                message = message_from_bytes(raw, policy=policy.default)
+                content: list[str] = []
+                for part in message.walk() if message.is_multipart() else [message]:
+                    if part.get_content_maintype() == "multipart":
+                        continue
+                    try:
+                        content.append(str(part.get_content() or ""))
+                    except Exception:
+                        continue
+                result.append({"id": self._decode_header(str(message.get("Message-ID") or uid.decode("utf-8", "replace"))), "subject": self._decode_header(str(message.get("Subject") or "")), "content": "\n".join(content)})
+            return result
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def list_messages(self, address: str, provider_token: str = "") -> list[dict[str, Any]]:
+        credential = self._credentials(provider_token)
+        errors: list[str] = []
+        if self.mode in {"graph", "auto"}:
+            try:
+                return self._graph_messages(credential)
+            except OutlookTokenError:
+                raise
+            except Exception as exc:
+                if self.mode == "graph":
+                    raise
+                errors.append(f"graph: {exc}")
+        if self.mode in {"imap", "auto"}:
+            try:
+                return self._imap_messages(credential)
+            except Exception as exc:
+                errors.append(f"imap: {exc}")
+        raise RuntimeError("; ".join(errors) or "Microsoft mailbox read failed")
+
+    def message_content(self, message_id: str, provider_token: str = "") -> str:
+        return ""
+
+    def mark_result(self, address: str, provider_token: str, success: bool, reason: str = "") -> None:
+        reason = str(reason or "")[:240]
+        try:
+            credential = self._credentials(provider_token)
+            login_email = credential.get("login_email") or address
+        except Exception:
+            login_email = address
+        state_name = "used" if success else ("token_invalid" if "Microsoft token refresh failed" in reason else "failed")
+        with _OUTLOOK_STATE_LOCK:
+            state = _read_outlook_state()
+            state[address.lower()] = {"state": state_name, "reason": reason, "updated_at": datetime.now(UTC).isoformat()}
+            _write_outlook_state(state)
+
+    def close(self) -> None:
+        self._session.close()
+
+
 class MailboxPool:
     def __init__(self, providers: list[dict[str, Any]], proxy: str = "") -> None:
         enabled = [p for p in providers if bool(p.get("enabled", True))]
         if not enabled:
             raise RuntimeError("At least one mailbox provider must be enabled")
-        factories = {"gptmail": GptMailProvider, "tempmail_lol": TempMailLolProvider}
+        factories = {"gptmail": GptMailProvider, "tempmail_lol": TempMailLolProvider, "outlook_token": OutlookTokenProvider}
         self._providers: list[_MailboxProvider] = []
         unsupported: list[str] = []
         for entry in enabled:
@@ -271,6 +665,16 @@ class MailboxPool:
         time.sleep(min(max(seconds, 0.0), remaining))
         return time.monotonic() < deadline
 
+    def mark_result(self, mailbox: Mailbox, *, success: bool, reason: str = "") -> None:
+        try:
+            context = json.loads(mailbox.token())
+            provider = self._providers[int(context.get("provider_index"))]
+            marker = getattr(provider, "mark_result", None)
+            if callable(marker):
+                marker(mailbox.address, str(context.get("provider_token") or ""), success, reason)
+        except Exception:
+            pass
+
     def wait_for_code(self, address: str, token: str, timeout: int = 120) -> str:
         try:
             context = json.loads(token)
@@ -298,6 +702,8 @@ class MailboxPool:
         except MailboxRateLimited as exc:
             next_wait = max(poll_interval, exc.retry_after or 15.0)
             print(f"[mail] {exc.provider_name} inbox rate limited; waiting {next_wait:.0f}s before retry", flush=True)
+        except OutlookTokenError:
+            raise
         except Exception as exc:
             next_wait = poll_interval
             print(f"[mail] initial inbox check failed: {type(exc).__name__}: {exc}", flush=True)
@@ -327,6 +733,8 @@ class MailboxPool:
             except MailboxRateLimited as exc:
                 next_wait = max(poll_interval, exc.retry_after or 15.0)
                 print(f"[mail] {exc.provider_name} inbox rate limited; waiting {next_wait:.0f}s before retry", flush=True)
+            except OutlookTokenError:
+                raise
             except Exception as exc:
                 next_wait = poll_interval
                 print(f"[mail] inbox polling failed: {type(exc).__name__}: {exc}", flush=True)
@@ -354,4 +762,4 @@ def extract_verification_code(content: str) -> str | None:
     return numeric.group(1) if numeric else None
 
 
-__all__ = ["Mailbox", "MailboxPool", "MailboxRateLimited", "TempMailLolProvider", "VerificationCodeTimeout", "extract_verification_code"]
+__all__ = ["Mailbox", "MailboxPool", "MailboxRateLimited", "OutlookTokenError", "OutlookTokenProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]

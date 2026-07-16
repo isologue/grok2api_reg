@@ -19,7 +19,7 @@ install_console()
 from DrissionPage import Chromium, ChromiumOptions
 
 from .cpa_queue import CpaExportQueue
-from .mail import MailboxPool, VerificationCodeTimeout
+from .mail import MailboxPool, OutlookTokenError, VerificationCodeTimeout
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
@@ -596,14 +596,18 @@ class BrowserRegistration:
                     )
                 except VerificationCodeTimeout as exc:
                     raise RetryableMailboxError(str(exc)) from exc
+                except OutlookTokenError as exc:
+                    raise RetryableMailboxError(f"Microsoft \u90ae\u7bb1\u51ed\u636e\u4e0d\u53ef\u7528\uff1a{exc}") from exc
                 self._submit_code(code)
                 profile = self._submit_profile()
                 sso = self._wait_for_sso()
                 oauth = self._collect_oauth_artifacts()
                 if not oauth.get("email"):
                     oauth["email"] = mailbox.address
+                self.mail_pool.mark_result(mailbox, success=True)
                 return {"email": mailbox.address, "sso": sso, "oauth": oauth, **profile}
             except RetryableMailboxError as exc:
+                self.mail_pool.mark_result(mailbox, success=False, reason=str(exc))
                 last_error = exc
                 print(
                     f"[run] 邮箱 {mailbox.address} 不可用: {exc}",

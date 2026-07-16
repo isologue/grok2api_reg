@@ -1,18 +1,20 @@
-"""Admin endpoints for the integrated browser registration worker and archive."""
+"""Admin endpoints for the integrated browser registration worker."""
 from __future__ import annotations
 
+import io
 import os
+import zipfile
 from typing import Any
 
-import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, RootModel
 
-from app.control.account.commands import AccountUpsert, ListAccountsQuery
+from app.control.account.commands import AccountUpsert
 from app.control.account.repository import AccountRepository
-from app.control.registration.archive import ARCHIVE_EXT_KEY, build_export_record, encrypt_profile
+from app.control.registration.archive import ARCHIVE_EXT_KEY, encrypt_profile
 from app.platform.auth.middleware import get_admin_key
+from app.platform.paths import data_path
 from . import get_repo
 
 router = APIRouter(prefix="/registration", tags=["Admin - Registration"])
@@ -57,6 +59,27 @@ async def save_registration_config(req: RegistrationSettingsRequest, request: Re
 @router.get("/status")
 async def registration_status(request: Request):
     return _manager(request).status()
+
+
+class OutlookPoolResetRequest(BaseModel):
+    scope: str = Field(default="all", pattern="^(retryable|failed|busy|invalid|used|unused|delete_invalid|all)$")
+
+
+@router.get("/outlook-pool/details")
+async def outlook_pool_details(provider_id: str, request: Request, status: str = "all"):
+    try:
+        return _manager(request).outlook_pool_details(provider_id, status)
+    except ValueError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/outlook-pool/reset")
+async def reset_outlook_pool(req: OutlookPoolResetRequest, request: Request):
+    """Clear only local Microsoft mailbox-pool state; mailbox credentials remain local and masked."""
+    try:
+        return _manager(request).reset_outlook_pool(req.scope)
+    except ValueError as exc:
+        raise _error(exc) from exc
 
 
 @router.post("/start")
@@ -105,28 +128,19 @@ async def import_registration_archives(
     return {"count": result.upserted or len(upserts), "skipped": 0}
 
 
-@router.get("/archive/export")
-async def export_registration_archives(
-    include_password: bool = False,
-    repo: AccountRepository = Depends(get_repo),
-):
-    """Export decrypted profiles in the Grok Build JSON layout requested by the user."""
-    records: list[Any] = []
-    page = 1
-    while True:
-        result = await repo.list_accounts(ListAccountsQuery(page=page, page_size=2000))
-        records.extend(result.items)
-        if page >= result.total_pages or not result.items:
-            break
-        page += 1
-    accounts = [
-        item for record in records
-        if not record.is_deleted()
-        for item in [build_export_record(record.token, record.ext, include_password=include_password)]
-        if item is not None
-    ]
-    headers = {"Content-Disposition": 'attachment; filename="grok2api-registration-archives.json"'}
-    return Response(content=orjson.dumps({"accounts": accounts}), media_type="application/json", headers=headers)
+@router.get("/cpa-auths/export")
+async def export_cpa_auths():
+    """Download generated CPA Auth JSON files as one ZIP archive."""
+    auth_dir = data_path("cpa_auths")
+    files = sorted(path for path in auth_dir.glob("*.json") if path.is_file())
+    if not files:
+        raise HTTPException(404, "No CPA Auth JSON files found")
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+            archive.write(path, arcname=path.name)
+    headers = {"Content-Disposition": 'attachment; filename="grok2api-cpa-auths.zip"'}
+    return Response(content=payload.getvalue(), media_type="application/zip", headers=headers)
 
 
 __all__ = ["router"]

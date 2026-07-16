@@ -117,6 +117,18 @@ class RegistrationManager:
             secret = str(clone.pop("api_key", "") or "")
             clone["api_key"] = ""
             clone["api_key_configured"] = bool(secret)
+            if str(clone.get("type") or "") == "outlook_token":
+                mailbox_text = str(clone.pop("mailboxes", "") or "")
+                from .mail import expand_outlook_aliases, outlook_pool_stats, parse_outlook_credentials
+                credentials = parse_outlook_credentials(mailbox_text)
+                expanded = expand_outlook_aliases(credentials, clone)
+                clone["mailboxes"] = ""
+                clone["mailboxes_configured"] = bool(mailbox_text)
+                clone["mailboxes_base_count"] = len(credentials)
+                clone["mailboxes_count"] = len(expanded)
+                clone["mailboxes_alias_count"] = max(0, len(expanded) - len(credentials))
+                clone["mailboxes_parse_stats"] = {"saved": len(credentials), "pending": 0}
+                clone["mailboxes_stats"] = outlook_pool_stats(credentials, clone)
             providers.append(clone)
         data.setdefault("mail", {})["providers"] = providers
         cpa = dict(data.get("cpa") or {})
@@ -145,12 +157,11 @@ class RegistrationManager:
             item = dict(value)
             item["id"] = _safe_name(str(item.get("id") or uuid.uuid4().hex[:10]))
             item["type"] = str(item.get("type") or "gptmail").strip().lower()
-            default_name = "TempMail.lol" if item["type"] == "tempmail_lol" else "GptMail"
+            default_name = {"tempmail_lol": "TempMail.lol", "outlook_token": "Microsoft ?????"}.get(item["type"], "GptMail")
             item["name"] = str(item.get("name") or f"{default_name} {index + 1}").strip()[:80]
             item["enabled"] = bool(item.get("enabled", True))
-            # TempMail.lol bypasses the browser/WARP proxy by default.  This is
-            # persisted only when the provider explicitly opts into that proxy.
-            item["use_proxy"] = bool(item.get("use_proxy", False))
+            # All mailbox APIs share the configured mailbox API proxy.
+            item.pop("use_proxy", None)
             item["api_base"] = str(item.get("api_base") or "").strip().rstrip("/")
             raw_domains = item.get("domains", item.get("domain", []))
             if isinstance(raw_domains, str):
@@ -162,10 +173,48 @@ class RegistrationManager:
                 secret = str(old_by_id.get(item["id"], {}).get("api_key") or "")
             item["api_key"] = secret
             item.pop("api_key_configured", None)
-            if item["type"] not in {"gptmail", "tempmail_lol"}:
-                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol")
+            if item["type"] not in {"gptmail", "tempmail_lol", "outlook_token"}:
+                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol, outlook_token")
+            mailbox_text = str(item.get("mailboxes") or "")
+            old_mailboxes = str(old_by_id.get(item["id"], {}).get("mailboxes") or "")
+            if item["type"] == "outlook_token":
+                if not mailbox_text.strip():
+                    mailbox_text = old_mailboxes
+                else:
+                    from .mail import parse_outlook_credentials
+                    merged: dict[str, dict[str, str]] = {credential["email"].lower(): credential for credential in parse_outlook_credentials(old_mailboxes)}
+                    for credential in parse_outlook_credentials(mailbox_text):
+                        merged[credential["email"].lower()] = credential
+                    mailbox_text = "\n".join(f'{credential["email"]}----{credential.get("password", "")}----{credential["client_id"]}----{credential["refresh_token"]}' for credential in merged.values())
+            item["mailboxes"] = mailbox_text
+            item.pop("mailboxes_configured", None)
+            item.pop("mailboxes_count", None)
+            item.pop("mailboxes_base_count", None)
+            item.pop("mailboxes_alias_count", None)
+            item.pop("mailboxes_stats", None)
+            item.pop("mailboxes_parse_stats", None)
+            if item["type"] == "outlook_token":
+                item["mode"] = str(item.get("mode") or "auto").strip().lower()
+                if item["mode"] not in {"graph", "imap", "auto"}:
+                    item["mode"] = "auto"
+                item["imap_host"] = str(item.get("imap_host") or "outlook.office365.com").strip() or "outlook.office365.com"
+                try:
+                    item["message_limit"] = max(1, min(100, int(item.get("message_limit") or 10)))
+                    item["alias_per_email"] = max(0, min(200, int(item.get("alias_per_email") or 0)))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Microsoft ????????????????") from exc
+                item["alias_enabled"] = bool(item.get("alias_enabled", False))
+                item["alias_include_original"] = bool(item.get("alias_include_original", True))
+                item["alias_prefix"] = re.sub(r"[^A-Za-z0-9._-]+", "", str(item.get("alias_prefix") or "c2api").strip()) or "c2api"
+            else:
+                for field in ("mode", "imap_host", "message_limit", "alias_enabled", "alias_per_email", "alias_prefix", "alias_include_original"):
+                    item.pop(field, None)
             if item["type"] == "gptmail" and item["enabled"] and (not item["api_base"] or not item["api_key"]):
                 raise ValueError(f"GptMail provider {item['name']} requires an API base URL and API key")
+            if item["type"] == "outlook_token" and item["enabled"]:
+                from .mail import parse_outlook_credentials
+                if not parse_outlook_credentials(mailbox_text):
+                    raise ValueError("Microsoft ????????????????email----password----client_id----refresh_token")
             normalized.append(item)
         run = incoming.setdefault("run", {})
         try:
@@ -220,6 +269,53 @@ class RegistrationManager:
         with contextlib.suppress(OSError):
             os.chmod(self._settings_path, 0o600)
         return self.get_settings()
+
+    @staticmethod
+    def _serialize_outlook_credentials(credentials: list[dict[str, str]]) -> str:
+        return "\n".join(
+            f'{credential["email"]}----{credential.get("password", "")}----{credential["client_id"]}----{credential["refresh_token"]}'
+            for credential in credentials
+        )
+
+    def outlook_pool_details(self, provider_id: str, status: str = "all") -> dict[str, Any]:
+        from .mail import outlook_pool_entries, parse_outlook_credentials
+
+        requested_id = str(provider_id or "").strip()
+        for provider in (self._read_settings_raw().get("mail") or {}).get("providers") or []:
+            if isinstance(provider, dict) and provider.get("type") == "outlook_token" and str(provider.get("id") or "") == requested_id:
+                rows = outlook_pool_entries(parse_outlook_credentials(str(provider.get("mailboxes") or "")), provider, status)
+                return {"provider_id": requested_id, "status": str(status or "all").strip().lower(), "count": len(rows), "items": rows}
+        raise ValueError("Microsoft ????????")
+
+    def reset_outlook_pool(self, scope: str = "all") -> dict[str, Any]:
+        """Maintain local Microsoft mailbox pool state without returning credentials."""
+        from .mail import parse_outlook_credentials, prune_outlook_unused_credentials, remove_outlook_invalid_credentials, reset_outlook_pool_state
+
+        normalized_scope = str(scope or "all").strip().lower()
+        aliases = {"failed": "retryable", "retryable": "retryable", "busy": "busy", "invalid": "invalid", "used": "used", "unused": "unused", "delete_invalid": "delete_invalid", "all": "all"}
+        normalized_scope = aliases.get(normalized_scope, "all")
+        if normalized_scope in {"unused", "delete_invalid"}:
+            data = self._read_settings_raw()
+            removed = 0
+            for provider in (data.get("mail") or {}).get("providers") or []:
+                if not isinstance(provider, dict) or provider.get("type") != "outlook_token":
+                    continue
+                credentials = parse_outlook_credentials(str(provider.get("mailboxes") or ""))
+                if normalized_scope == "unused":
+                    kept, count = prune_outlook_unused_credentials(credentials, provider)
+                else:
+                    kept, count = remove_outlook_invalid_credentials(credentials, provider)
+                if count:
+                    provider["mailboxes"] = self._serialize_outlook_credentials(kept)
+                    removed += count
+            if removed:
+                self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            cleared = removed
+        else:
+            cleared = reset_outlook_pool_state(normalized_scope)
+        result = self.get_settings()
+        result["outlook_pool_reset"] = {"scope": normalized_scope, "cleared": cleared}
+        return result
 
     def status(self) -> dict[str, Any]:
         state = dict(self._runtime)
