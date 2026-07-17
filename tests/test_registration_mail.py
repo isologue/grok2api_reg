@@ -108,6 +108,32 @@ class OutlookCompatibilityTests(unittest.TestCase):
         provider.close()
 
 
+class MailboxBaselineTests(unittest.TestCase):
+    class _Provider:
+        poll_interval_seconds = 0.0
+
+        def __init__(self) -> None:
+            self.messages = [{"id": "old", "subject": "Old code", "content": "Use OLD-111"}]
+
+        def list_messages(self, address: str, provider_token: str):
+            return list(self.messages)
+
+        def message_content(self, message_id: str, provider_token: str) -> str:
+            return ""
+
+    def test_pre_send_baseline_rejects_historical_codes_from_shared_inbox(self) -> None:
+        provider = self._Provider()
+        pool = object.__new__(MailboxPool)
+        pool._providers = [provider]
+        token = '{"provider_index":0,"provider_token":"context"}'
+        baseline = pool.capture_inbox_baseline("alias@example.test", token)
+        provider.messages.insert(0, {"id": "new", "subject": "New code", "content": "Use NEW-222"})
+        polls = iter([True, False])
+        pool._sleep_until_next_poll = lambda deadline, seconds: next(polls)
+
+        self.assertEqual(pool.wait_for_code("alias@example.test", token, timeout=1, known_message_ids=baseline), "NEW-222")
+
+
 class OutlookPreflightTests(unittest.TestCase):
     def test_preflight_marks_only_definitive_token_failures_invalid(self) -> None:
         entry = {"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "alias_enabled": True, "alias_per_email": 1, "preflight_enabled": True}

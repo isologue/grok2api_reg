@@ -54,10 +54,21 @@ def _translate_mail(message: str) -> str:
     match = re.fullmatch(r"(.+) inbox rate limited; waiting ([\d.]+)s before retry", message)
     if match:
         return f"{match.group(1)} 收件箱触发限流，{match.group(2)} 秒后重试"
+    match = re.fullmatch(r"inbox baseline captured: (\d+) messages", message)
+    if match:
+        return "\u5df2\u8bb0\u5f55\u53d1\u9001\u9a8c\u8bc1\u90ae\u4ef6\u524d\u7684\u6536\u4ef6\u7bb1\u57fa\u7ebf\uff1a" + match.group(1) + " \u5c01\u90ae\u4ef6"
+    if message.startswith("inbox baseline capture failed: "):
+        return "\u6536\u4ef6\u7bb1\u57fa\u7ebf\u8bb0\u5f55\u5931\u8d25\uff1a" + message.removeprefix("inbox baseline capture failed: ")
     if message.startswith("initial inbox check failed: "):
         return "首次收件箱检查失败：" + message.removeprefix("initial inbox check failed: ").replace(": ", "：", 1)
     if message.startswith("inbox polling failed: "):
         return "收件箱轮询失败：" + message.removeprefix("inbox polling failed: ").replace(": ", "：", 1)
+    return message
+
+
+def _translate_run(message: str) -> str:
+    if message.startswith(("verification code filled: ", "verification submit attempted: ", "verification page did not advance: ")):
+        return _translate_mail(message)
     return message
 
 
@@ -170,6 +181,8 @@ class _PrettyStream:
         component = _PREFIXES.get(raw_component, raw_component.upper())
         if raw_component == "mail":
             message = _translate_mail(message)
+        elif raw_component == "run":
+            message = _translate_run(message)
         elif raw_component == "cpa":
             message = _translate_cpa(message)
         elif raw_component == "browser":

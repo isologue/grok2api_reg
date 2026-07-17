@@ -852,7 +852,40 @@ class MailboxPool:
         except Exception:
             pass
 
-    def wait_for_code(self, address: str, token: str, timeout: int = 120) -> str:
+    @staticmethod
+    def _message_id(item: dict[str, Any]) -> str:
+        return str(item.get("id") or item.get("token") or item.get("message_id") or "")
+
+    def capture_inbox_baseline(self, address: str, token: str) -> set[str]:
+        """Snapshot inbox IDs *before* xAI sends an OTP.
+
+        Microsoft plus aliases share one physical inbox.  Without this snapshot a
+        verification email sent to an earlier alias can be mistaken for the OTP
+        of the current registration attempt.
+        """
+        try:
+            context = json.loads(token)
+            provider = self._providers[int(context.get("provider_index"))]
+            provider_token = str(context.get("provider_token") or "")
+            messages = provider.list_messages(address, provider_token)
+            known = {self._message_id(item) for item in messages if self._message_id(item)}
+            print(f"[mail] inbox baseline captured: {len(known)} messages", flush=True)
+            return known
+        except OutlookTokenError:
+            raise
+        except Exception as exc:
+            # The registration can still continue; a later inbox read will use an
+            # empty baseline, but this condition is visible in the logs.
+            print(f"[mail] inbox baseline capture failed: {type(exc).__name__}: {exc}", flush=True)
+            return set()
+
+    def wait_for_code(
+        self,
+        address: str,
+        token: str,
+        timeout: int = 120,
+        known_message_ids: set[str] | None = None,
+    ) -> str:
         try:
             context = json.loads(token)
             provider = self._providers[int(context.get("provider_index"))]
@@ -862,34 +895,29 @@ class MailboxPool:
 
         deadline = time.monotonic() + timeout
         poll_interval = max(3.0, float(getattr(provider, "poll_interval_seconds", 3.0)))
-        old_ids: set[str] = set()
-        next_wait = 0.0
-
-        try:
-            existing = provider.list_messages(address, provider_token)
-            old_ids = {str(item.get("id") or item.get("token") or item.get("message_id") or "") for item in existing}
-            for item in existing:
-                inline = self._inline_message_content(item)
-                code = extract_verification_code(inline) or extract_verification_code(str(item.get("subject") or ""))
-                if code:
-                    print(f"[mail] verification code received: {code}", flush=True)
-                    return code
-            # Do not immediately re-read the same inbox after the baseline check.
-            next_wait = poll_interval
-        except MailboxRateLimited as exc:
-            next_wait = max(poll_interval, exc.retry_after or 15.0)
-            print(f"[mail] {exc.provider_name} inbox rate limited; waiting {next_wait:.0f}s before retry", flush=True)
-        except OutlookTokenError:
-            raise
-        except Exception as exc:
-            next_wait = poll_interval
-            print(f"[mail] initial inbox check failed: {type(exc).__name__}: {exc}", flush=True)
+        old_ids: set[str] = set(known_message_ids or ())
+        # The runner normally supplies a baseline captured before submitting the
+        # email. For direct callers, build a safe baseline now and never accept a
+        # code found in that historical snapshot.
+        next_wait = 0.0 if known_message_ids is not None else poll_interval
+        if known_message_ids is None:
+            try:
+                existing = provider.list_messages(address, provider_token)
+                old_ids.update(self._message_id(item) for item in existing if self._message_id(item))
+                print(f"[mail] inbox baseline captured: {len(old_ids)} messages", flush=True)
+            except MailboxRateLimited as exc:
+                next_wait = max(poll_interval, exc.retry_after or 15.0)
+                print(f"[mail] {exc.provider_name} inbox rate limited; waiting {next_wait:.0f}s before retry", flush=True)
+            except OutlookTokenError:
+                raise
+            except Exception as exc:
+                print(f"[mail] initial inbox check failed: {type(exc).__name__}: {exc}", flush=True)
 
         print(f"[mail] waiting for {address} verification code, timeout {timeout}s", flush=True)
         while self._sleep_until_next_poll(deadline, next_wait):
             try:
                 for item in provider.list_messages(address, provider_token):
-                    message_id = str(item.get("id") or item.get("token") or item.get("message_id") or "")
+                    message_id = self._message_id(item)
                     if not message_id or message_id in old_ids:
                         continue
                     inline = self._inline_message_content(item)

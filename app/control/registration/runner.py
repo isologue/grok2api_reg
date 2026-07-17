@@ -313,6 +313,7 @@ class BrowserRegistration:
     def _find_verification_submit_button(self) -> Any | None:
         """Use a real click first: xAI currently labels the OTP action Continue."""
         for locator in (
+            "text:Confirm email",
             "text:Continue",
             "text:Verify",
             "text:Next",
@@ -386,15 +387,15 @@ class BrowserRegistration:
                 next_submit = time.monotonic() + 1.2
             text = str(self._js("return document.body ? document.body.innerText : ''") or "").lower()
             if "too many requests" in text or "rate limited" in text:
-                raise RuntimeError("???????????")
-            if "rejected" in text or "????" in text:
-                raise RetryableMailboxError("????????? xAI ??")
+                raise RuntimeError("\u9a8c\u8bc1\u7801\u63d0\u4ea4\u540e\u88ab\u4e0a\u6e38\u9650\u6d41")
+            if "rejected" in text or "\u5df2\u88ab\u62d2\u7edd" in text:
+                raise RetryableMailboxError("\u9a8c\u8bc1\u7801\u63d0\u4ea4\u540e\u90ae\u7bb1\u88ab xAI \u62d2\u7edd")
             if any(marker in text for marker in ("invalid code", "incorrect code", "expired code", "code has expired")):
-                raise RetryableMailboxError("?????????")
+                raise RetryableMailboxError("\u9a8c\u8bc1\u7801\u65e0\u6548\u6216\u5df2\u8fc7\u671f")
             last_state = self._verification_submission_state()
             time.sleep(0.75)
         print(f"[run] verification page did not advance: {json.dumps(last_state, ensure_ascii=False, sort_keys=True)}", flush=True)
-        raise RetryableMailboxError("???????????????")
+        raise RetryableMailboxError("\u9a8c\u8bc1\u7801\u5df2\u63d0\u4ea4\u4f46\u672a\u8fdb\u5165\u8d26\u6237\u8d44\u6599\u9875")
 
     def _has_profile_form(self) -> bool:
         return bool(self._js('''
@@ -665,13 +666,16 @@ class BrowserRegistration:
             )
             try:
                 self._open_email_flow()
+                mailbox_token = mailbox.token()
+                inbox_baseline = self.mail_pool.capture_inbox_baseline(mailbox.address, mailbox_token)
                 self._submit_email(mailbox.address)
                 self._wait_for_code_page()
                 try:
                     code = self.mail_pool.wait_for_code(
                         mailbox.address,
-                        mailbox.token(),
+                        mailbox_token,
                         timeout=code_timeout_sec,
+                        known_message_ids=inbox_baseline,
                     )
                 except VerificationCodeTimeout as exc:
                     raise RetryableMailboxError(str(exc)) from exc

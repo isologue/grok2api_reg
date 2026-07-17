@@ -39,7 +39,7 @@ class _VerificationPage(_Page):
 
     def ele(self, locator: str, timeout: int = 0):
         self.locators.append(locator)
-        return self.button if locator == "text:Continue" else None
+        return self.button if locator == "text:Confirm email" else None
 
 
 class RegistrationProfileSubmitTests(unittest.TestCase):
@@ -62,7 +62,7 @@ class RegistrationProfileSubmitTests(unittest.TestCase):
         registration._js = lambda *args: "not-found"
 
         self.assertEqual(registration._click_verification_submit(), "native")
-        self.assertEqual(page.locators[0], "text:Continue")
+        self.assertEqual(page.locators[0], "text:Confirm email")
         self.assertTrue(button.clicked)
 
     def test_profile_submit_requires_post_click_confirmation(self) -> None:
