@@ -5,7 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from .cpa import export_cookies_from_page, export_cpa_auth
+from .cpa import export_cookies_from_page, export_cpa_auth, record_cpa_task_result
 
 
 class CpaExportQueue:
@@ -44,7 +44,12 @@ class CpaExportQueue:
                 print(f"[cpa] mint gap protection: waiting {wait:.1f}s", flush=True)
                 time.sleep(wait)
             self._last_started = time.monotonic()
-        result = export_cpa_auth(account=account, cpa=self._cpa, cookies=cookies)
+        try:
+            result = export_cpa_auth(account=account, cpa=self._cpa, cookies=cookies)
+        except Exception:
+            record_cpa_task_result(self._cpa, {"ok": False, "error": "export exception"})
+            raise
+        record_cpa_task_result(self._cpa, result)
         if result.get("ok"):
             print(f"[cpa] OIDC export completed: {result.get('path')}", flush=True)
         elif not result.get("skipped"):

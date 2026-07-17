@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from app.platform.paths import data_path, log_path
+from .cpa import finalize_cpa_task, initialize_cpa_task
 
 _DEFAULT_SETTINGS: dict[str, Any] = {
     "run": {
@@ -357,9 +358,17 @@ class RegistrationManager:
 
 
             task_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+            task_started_at = _now()
             run_dir = self._dir / "runs"
             run_dir.mkdir(parents=True, exist_ok=True)
             payload = copy.deepcopy(settings)
+            payload.setdefault("cpa", {})["task_id"] = task_id
+            initialize_cpa_task(
+                payload["cpa"],
+                task_id,
+                started_at=task_started_at,
+                requested_count=int((payload.get("run") or {}).get("count") or 0),
+            )
             payload["api"] = {
                 "endpoint": f"http://127.0.0.1:{server_port}/admin/api/registration/archive/import",
                 "token": admin_key,
@@ -374,7 +383,7 @@ class RegistrationManager:
             log_file = logs_dir / f"{task_id}.log"
             self._lines.clear()
             self._runtime = {
-                "state": "running", "task_id": task_id, "started_at": _now(), "finished_at": None,
+                "state": "running", "task_id": task_id, "started_at": task_started_at, "finished_at": None,
                 "exit_code": None, "message": "浏览器注册任务正在运行", "log_file": str(log_file),
             }
             try:
@@ -389,7 +398,7 @@ class RegistrationManager:
                 raise
             self._process = process
             self._watch_task = asyncio.create_task(
-                self._watch_process(process, log_file, config_path), name=f"registration-{task_id}"
+                self._watch_process(process, log_file, config_path, task_id, payload["cpa"]), name=f"registration-{task_id}"
             )
             return self.status()
 
@@ -398,6 +407,8 @@ class RegistrationManager:
         process: asyncio.subprocess.Process,
         log_file: Path,
         config_path: Path,
+        task_id: str,
+        cpa: dict[str, Any],
     ) -> None:
         if process.stdout is None:
             config_path.unlink(missing_ok=True)
@@ -429,6 +440,13 @@ class RegistrationManager:
             # DATA_DIR after the task ends.
             with contextlib.suppress(OSError):
                 config_path.unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                finalize_cpa_task(
+                    cpa,
+                    task_id,
+                    state=str(self._runtime.get("state") or "completed"),
+                    finished_at=str(self._runtime.get("finished_at") or _now()),
+                )
             if self._process is process:
                 self._process = None
             if self._watch_task is asyncio.current_task():
