@@ -91,7 +91,11 @@ class GptMailProvider(_MailboxProvider):
     def create_mailbox(self) -> str:
         response = self.session.get(f"{self.base_url}/api/generate-email", headers=self._headers(), timeout=20)
         response.raise_for_status()
-        body = response.json()
+        try:
+            body = response.json()
+        except Exception as exc:
+            preview = str(getattr(response, "text", "") or "").replace("\n", " ").strip()[:240]
+            raise RuntimeError(f"GptMail generate-email returned invalid JSON: HTTP {response.status_code}, url={self.base_url}/api/generate-email, body={preview}") from exc
         address = str((body.get("data") or {}).get("email") or "").strip()
         if not body.get("success") or not address:
             raise RuntimeError(str(body.get("error") or f"{self.name} did not return an email address"))

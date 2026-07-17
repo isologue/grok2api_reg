@@ -173,6 +173,11 @@ class RegistrationManager:
                 # effective default while still allowing a compatible custom URL.
                 if not item["api_base"]:
                     item["api_base"] = "https://api.tempmail.lol/v2"
+            elif item["type"] == "gptmail" and "api.tempmail.lol" in item["api_base"].lower():
+                # A TempMail.lol endpoint cannot answer GptMail's /api/* API.
+                # Clear it so validation reports the missing GptMail settings
+                # instead of failing later with a misleading JSON parse error.
+                item["api_base"] = ""
             raw_domains = item.get("domains", item.get("domain", []))
             if isinstance(raw_domains, str):
                 raw_domains = [part.strip() for part in raw_domains.split(",")]
