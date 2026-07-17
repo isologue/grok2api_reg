@@ -32,6 +32,16 @@ class _Page:
         return []
 
 
+class _VerificationPage(_Page):
+    def __init__(self, button: _Button) -> None:
+        super().__init__(button)
+        self.locators: list[str] = []
+
+    def ele(self, locator: str, timeout: int = 0):
+        self.locators.append(locator)
+        return self.button if locator == "text:Continue" else None
+
+
 class RegistrationProfileSubmitTests(unittest.TestCase):
     @staticmethod
     def _registration() -> BrowserRegistration:
@@ -43,6 +53,17 @@ class RegistrationProfileSubmitTests(unittest.TestCase):
         registration._turnstile_state = lambda: "pending"
 
         self.assertFalse(registration._try_turnstile())
+
+    def test_verification_submit_prefers_native_continue_button(self) -> None:
+        registration = self._registration()
+        button = _Button()
+        page = _VerificationPage(button)
+        registration.page = page
+        registration._js = lambda *args: "not-found"
+
+        self.assertEqual(registration._click_verification_submit(), "native")
+        self.assertEqual(page.locators[0], "text:Continue")
+        self.assertTrue(button.clicked)
 
     def test_profile_submit_requires_post_click_confirmation(self) -> None:
         registration = self._registration()

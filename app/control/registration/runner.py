@@ -293,40 +293,108 @@ class BrowserRegistration:
             time.sleep(1)
         raise RetryableMailboxError("未进入验证码页面")
 
+    def _verification_submission_state(self) -> dict[str, Any]:
+        """Collect a redacted OTP-page snapshot when verification does not advance."""
+        try:
+            value = self._js(r"""
+              const clean=(value)=>String(value||'').replace(/[A-Z0-9]{3,4}-[A-Z0-9]{3,4}/ig,'<code>').replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig,'<email>').replace(/\s+/g,' ').trim().slice(0,180);
+              const visible=(node)=>node&&(()=>{const s=getComputedStyle(node),r=node.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;})();
+              return {
+                url: location.href,
+                code_inputs: [...document.querySelectorAll('input[data-input-otp="true"],input[name="code"],input[autocomplete="one-time-code"]')].filter(visible).length,
+                buttons: [...document.querySelectorAll('button,[role="button"],input[type="submit"]')].filter(visible).map((node)=>clean(node.innerText||node.textContent||node.value||'')).filter(Boolean).slice(0,8),
+                text: clean(document.body?.innerText||''),
+              };
+            """)
+            return value if isinstance(value, dict) else {"state": str(value or "")[:180]}
+        except Exception as exc:
+            return {"state_error": type(exc).__name__}
+
+    def _find_verification_submit_button(self) -> Any | None:
+        """Use a real click first: xAI currently labels the OTP action Continue."""
+        for locator in (
+            "text:Continue",
+            "text:Verify",
+            "text:Next",
+            "text:Confirm",
+            "@@type=submit",
+        ):
+            try:
+                button = self.page.ele(locator, timeout=2)
+            except Exception:
+                continue
+            if button:
+                return button
+        return None
+
+    def _click_verification_submit(self) -> str:
+        button = self._find_verification_submit_button()
+        if button:
+            try:
+                waiter = getattr(button, "wait", None)
+                if waiter:
+                    waiter.enabled(timeout=3)
+                button.click(timeout=3)
+                return "native"
+            except Exception:
+                pass
+        result = self._js("""
+          const visible=(node)=>node&&(()=>{const s=getComputedStyle(node),r=node.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;})();
+          const nodes=[...document.querySelectorAll('button,[role="button"],input[type="submit"]')].filter(visible);
+          const button=nodes.find((node)=>/verify|continue|next|confirm|submit/i.test(node.innerText||node.textContent||node.value||'')) || nodes.find((node)=>node.type==='submit');
+          if(button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true'){
+            const form=button.form||button.closest('form');
+            if(form&&typeof form.requestSubmit==='function'){form.requestSubmit(button);return 'request-submitted';}
+            button.click();return 'js-clicked';
+          }
+          const input=[...document.querySelectorAll('input[data-input-otp="true"],input[name="code"],input[autocomplete="one-time-code"]')].find(visible);
+          const form=input?.closest('form');
+          if(form&&typeof form.requestSubmit==='function'&&form.checkValidity()){form.requestSubmit();return 'form-submitted';}
+          return button ? 'disabled' : 'not-found';
+        """)
+        return str(result or "not-found")
+
     def _submit_code(self, code: str, timeout: int = 45) -> None:
         code = "".join(char for char in code.upper() if char.isalnum())
         deadline = time.monotonic() + timeout
-        submitted = False
+        filled = False
+        next_submit = 0.0
+        last_state: dict[str, Any] = {}
         while time.monotonic() < deadline:
             self._refresh_active_page()
             if self._has_profile_form():
                 return
-            filled = self._js('''
-              const code=arguments[0];
-              const visible=(node)=>node&&(()=>{const s=getComputedStyle(node),r=node.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;})();
-              const put=(node,value)=>{const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;setter?setter.call(node,value):node.value=value;node.dispatchEvent(new Event('input',{bubbles:true}));node.dispatchEvent(new Event('change',{bubbles:true}));node.dispatchEvent(new Event('blur',{bubbles:true}));};
-              const single=[...document.querySelectorAll('input[data-input-otp="true"],input[name="code"],input[autocomplete="one-time-code"]')].find(visible);
-              if(single){put(single,code);return true;}
-              const boxes=[...document.querySelectorAll('input')].filter((node)=>visible(node)&&(node.maxLength===1||node.getAttribute('inputmode')==='numeric'));
-              if(boxes.length>=code.length){[...code].forEach((char,index)=>put(boxes[index],char));return true;}return false;
-            ''', code)
-            if filled and not submitted:
-                submitted = True
-                print(f"[run] 验证码已填入: {code}", flush=True)
-                self._js('''
+            if not filled:
+                filled = bool(self._js("""
+                  const code=arguments[0];
                   const visible=(node)=>node&&(()=>{const s=getComputedStyle(node),r=node.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;})();
-                  const nodes=[...document.querySelectorAll('button,[role="button"],input[type="submit"]')].filter(visible);
-                  const button=nodes.find((node)=>/verify|验证|next|继续/i.test(node.innerText||node.textContent||node.value||''));
-                  if(button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true'){button.click();return true;}
-                  return false;
-                ''')
+                  const put=(node,value)=>{const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;setter?setter.call(node,value):node.value=value;node.focus();node.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));node.dispatchEvent(new Event('change',{bubbles:true}));node.dispatchEvent(new Event('blur',{bubbles:true}));};
+                  const single=[...document.querySelectorAll('input[data-input-otp="true"],input[name="code"],input[autocomplete="one-time-code"]')].find(visible);
+                  if(single){put(single,code);return true;}
+                  const boxes=[...document.querySelectorAll('input')].filter((node)=>visible(node)&&(node.maxLength===1||node.getAttribute('inputmode')==='numeric'));
+                  if(boxes.length>=code.length){[...code].forEach((char,index)=>put(boxes[index],char));return true;}return false;
+                """, code))
+                if filled:
+                    print(f"[run] verification code filled: {code}", flush=True)
+                    time.sleep(0.35)
+                else:
+                    time.sleep(0.5)
+                    continue
+            if time.monotonic() >= next_submit:
+                action = self._click_verification_submit()
+                print(f"[run] verification submit attempted: {action}", flush=True)
+                next_submit = time.monotonic() + 1.2
             text = str(self._js("return document.body ? document.body.innerText : ''") or "").lower()
             if "too many requests" in text or "rate limited" in text:
-                raise RuntimeError("验证码提交后被上游限流")
-            if "rejected" in text or "已被拒绝" in text:
-                raise RetryableMailboxError("验证码提交后邮箱被 xAI 拒绝")
-            time.sleep(1)
-        raise RetryableMailboxError("验证码已提交但未进入账户资料页")
+                raise RuntimeError("???????????")
+            if "rejected" in text or "????" in text:
+                raise RetryableMailboxError("????????? xAI ??")
+            if any(marker in text for marker in ("invalid code", "incorrect code", "expired code", "code has expired")):
+                raise RetryableMailboxError("?????????")
+            last_state = self._verification_submission_state()
+            time.sleep(0.75)
+        print(f"[run] verification page did not advance: {json.dumps(last_state, ensure_ascii=False, sort_keys=True)}", flush=True)
+        raise RetryableMailboxError("???????????????")
 
     def _has_profile_form(self) -> bool:
         return bool(self._js('''

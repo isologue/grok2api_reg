@@ -40,6 +40,14 @@ def _translate_mail(message: str) -> str:
         return f"{match.group(1)} 已分配邮箱：{match.group(2)}"
     if message.startswith("verification code received: "):
         return f"已收到验证码：{message.removeprefix('verification code received: ')}"
+    if message.startswith("verification code filled: "):
+        return "\u9a8c\u8bc1\u7801\u5df2\u586b\u5165: " + message.removeprefix("verification code filled: ")
+    if message.startswith("verification submit attempted: "):
+        action = message.removeprefix("verification submit attempted: ")
+        labels = {"native": "\u6d4f\u89c8\u5668\u539f\u751f\u70b9\u51fb", "request-submitted": "\u8868\u5355\u63d0\u4ea4", "js-clicked": "\u9875\u9762\u70b9\u51fb", "form-submitted": "\u8868\u5355\u515c\u5e95\u63d0\u4ea4", "disabled": "\u63d0\u4ea4\u6309\u94ae\u672a\u5c31\u7eea", "not-found": "\u672a\u627e\u5230\u63d0\u4ea4\u6309\u94ae"}
+        return "\u9a8c\u8bc1\u7801\u63d0\u4ea4\u5c1d\u8bd5: " + labels.get(action, action)
+    if message.startswith("verification page did not advance: "):
+        return "\u9a8c\u8bc1\u7801\u9875\u9762\u672a\u8df3\u8f6c\uff0c\u5f53\u524d\u9875\u9762\u72b6\u6001: " + message.removeprefix("verification page did not advance: ")
     match = re.fullmatch(r"waiting for (.+) verification code, timeout (\d+)s", message)
     if match:
         return f"等待 {match.group(1)} 的验证码（超时 {match.group(2)} 秒）"
