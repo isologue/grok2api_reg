@@ -224,8 +224,15 @@ class TempMailLolProvider(_MailboxProvider):
         self.session.close()
 
 
-OUTLOOK_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+# Consumer Microsoft accounts can accept a refresh token on /consumers while
+# rejecting the same request against /common.  Keep the compatibility order used
+# by the standalone registration worker before using the generic endpoint.
+OUTLOOK_TOKEN_URLS = (
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+    "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+)
 OUTLOOK_GRAPH_MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/messages"
+OUTLOOK_REST_MESSAGES_URL = "https://outlook.office.com/api/v2.0/me/messages"
 OUTLOOK_GRAPH_SCOPE = "offline_access https://graph.microsoft.com/Mail.Read"
 OUTLOOK_IMAP_SCOPE = "offline_access https://outlook.office.com/IMAP.AccessAsUser.All"
 OUTLOOK_DEFAULT_IMAP_HOST = "outlook.office365.com"
@@ -443,7 +450,11 @@ def reset_outlook_pool_state(scope: str = "all") -> int:
 
 
 class OutlookTokenError(RuntimeError):
-    pass
+    """Microsoft OAuth failure with an explicit invalid-vs-transient classification."""
+
+    def __init__(self, message: str, *, definitive: bool = True) -> None:
+        super().__init__(message)
+        self.definitive = definitive
 
 
 class OutlookTokenProvider(_MailboxProvider):
@@ -487,6 +498,10 @@ class OutlookTokenProvider(_MailboxProvider):
                 # proves both refresh-token usability and actual mailbox access.
                 self.list_messages(credential["email"], context)
             except OutlookTokenError as exc:
+                if not exc.definitive:
+                    result["transient"] += 1
+                    print(f"[mail] Microsoft mailbox preflight deferred: {credential['email']} ({type(exc).__name__}: {exc})", flush=True)
+                    continue
                 reason = str(exc)[:240]
                 expanded = expand_outlook_aliases([credential], self._entry)
                 with _OUTLOOK_STATE_LOCK:
@@ -544,39 +559,127 @@ class OutlookTokenProvider(_MailboxProvider):
         result["login_email"] = result["login_email"] or result["email"]
         return result
 
-    def _access_token(self, credential: dict[str, str], scope: str) -> str:
-        key = (credential["email"].lower(), scope)
+    def _access_token(self, credential: dict[str, str], scope: str = "", *, with_scope: bool = False) -> str:
+        """Refresh an access token using the standalone worker's compatible order.
+
+        The first attempt intentionally omits ``scope``.  Older consumer refresh
+        tokens can be restricted to Outlook REST and reject a new Graph/IMAP scope.
+        Callers that need a resource-specific token can retry with ``with_scope``.
+        """
+        cache_scope = scope if with_scope else "compat"
+        key = (credential["email"].lower(), cache_scope)
         cached = self._token_cache.get(key)
         if cached and time.monotonic() < cached[1]:
             return cached[0]
-        response = self._session.post(OUTLOOK_TOKEN_URL, data={"client_id": credential["client_id"], "grant_type": "refresh_token", "refresh_token": credential["refresh_token"], "scope": scope}, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30, verify=False)
-        if response.status_code != 200:
+
+        payload = {
+            "client_id": credential["client_id"],
+            "grant_type": "refresh_token",
+            "refresh_token": credential["refresh_token"],
+        }
+        if with_scope and scope:
+            payload["scope"] = scope
+        failures: list[tuple[str, bool]] = []
+        for endpoint in OUTLOOK_TOKEN_URLS:
+            endpoint_name = endpoint.rsplit("/", 4)[-4]
+            try:
+                response = self._session.post(
+                    endpoint,
+                    data=payload,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=30,
+                    verify=False,
+                )
+            except Exception as exc:
+                # Proxy, TLS and network errors must not poison a mailbox pool.
+                failures.append((f"{endpoint_name}: {type(exc).__name__}", False))
+                continue
+            if response.status_code == 200:
+                try:
+                    body = response.json() or {}
+                except Exception:
+                    body = {}
+                token = str(body.get("access_token") or "").strip()
+                if token:
+                    self._token_cache[key] = (token, time.monotonic() + 600)
+                    return token
+                failures.append((f"{endpoint_name}: no access_token", False))
+                continue
             try:
                 body = response.json() or {}
             except Exception:
                 body = {}
-            error = str(body.get("error") or "").strip()
+            error = str(body.get("error") or "").strip().lower()
             description = str(body.get("error_description") or "").replace("\n", " ").strip()
             aadsts = re.search(r"AADSTS\d+", description, flags=re.IGNORECASE)
             detail = " ".join(part for part in (error, aadsts.group(0).upper() if aadsts else "") if part)
-            raise OutlookTokenError(f"Microsoft token refresh failed: HTTP {response.status_code}{f' ({detail})' if detail else ''}")
-        token = str((response.json() or {}).get("access_token") or "").strip()
-        if not token:
-            raise OutlookTokenError("Microsoft token refresh returned no access_token")
-        self._token_cache[key] = (token, time.monotonic() + 600)
-        return token
+            definitive = response.status_code == 400 and error in {"invalid_grant", "invalid_client", "unauthorized_client"}
+            failures.append((f"{endpoint_name}: HTTP {response.status_code}{f' ({detail})' if detail else ''}", definitive))
+        message = "; ".join(item[0] for item in failures) or "no token endpoint succeeded"
+        raise OutlookTokenError(f"Microsoft token refresh failed: {message}", definitive=bool(failures) and all(item[1] for item in failures))
 
-    def _graph_messages(self, credential: dict[str, str]) -> list[dict[str, Any]]:
-        token = self._access_token(credential, OUTLOOK_GRAPH_SCOPE)
-        response = self._session.get(OUTLOOK_GRAPH_MESSAGES_URL, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "id,subject,body,bodyPreview"}, timeout=30, verify=False)
-        if response.status_code != 200:
-            raise RuntimeError(f"Microsoft Graph mailbox request failed: HTTP {response.status_code}")
-        payload = response.json() or {}
+    @staticmethod
+    def _normalise_graph_messages(payload: Any) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for item in payload.get("value", []) if isinstance(payload, dict) else []:
-            if isinstance(item, dict):
-                body = item.get("body") if isinstance(item.get("body"), dict) else {}
-                result.append({"id": str(item.get("id") or ""), "subject": str(item.get("subject") or ""), "content": str(body.get("content") or item.get("bodyPreview") or "")})
+            if not isinstance(item, dict):
+                continue
+            body = item.get("body") if isinstance(item.get("body"), dict) else {}
+            result.append({
+                "id": str(item.get("id") or ""),
+                "subject": str(item.get("subject") or ""),
+                "content": str(body.get("content") or item.get("bodyPreview") or ""),
+            })
+        return result
+
+    def _graph_messages(self, credential: dict[str, str]) -> list[dict[str, Any]]:
+        token_errors: list[OutlookTokenError] = []
+        request_errors: list[str] = []
+        # First mirror the legacy worker (no requested scope), then ask Graph for
+        # an explicit Mail.Read token only if the original token cannot read Graph.
+        for with_scope in (False, True):
+            try:
+                token = self._access_token(credential, OUTLOOK_GRAPH_SCOPE, with_scope=with_scope)
+            except OutlookTokenError as exc:
+                token_errors.append(exc)
+                continue
+            response = self._session.get(
+                OUTLOOK_GRAPH_MESSAGES_URL,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "id,subject,body,bodyPreview"},
+                timeout=30,
+                verify=False,
+            )
+            if response.status_code == 200:
+                return self._normalise_graph_messages(response.json() or {})
+            request_errors.append(f"Microsoft Graph mailbox request failed: HTTP {response.status_code}")
+        if request_errors:
+            raise RuntimeError("; ".join(request_errors))
+        raise token_errors[-1] if token_errors else OutlookTokenError("Microsoft token refresh failed")
+
+    def _outlook_rest_messages(self, credential: dict[str, str]) -> list[dict[str, Any]]:
+        """Fallback for older personal-account refresh tokens bound to Outlook REST."""
+        token = self._access_token(credential)
+        response = self._session.get(
+            OUTLOOK_REST_MESSAGES_URL,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            params={"$top": self.message_limit, "$orderby": "ReceivedDateTime desc", "$select": "Id,Subject,Body,BodyPreview"},
+            timeout=30,
+            verify=False,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Outlook REST mailbox request failed: HTTP {response.status_code}")
+        result: list[dict[str, Any]] = []
+        payload = response.json() or {}
+        for item in payload.get("value", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            body = item.get("Body") if isinstance(item.get("Body"), dict) else {}
+            result.append({
+                "id": str(item.get("Id") or ""),
+                "subject": str(item.get("Subject") or ""),
+                "content": str(body.get("Content") or item.get("BodyPreview") or ""),
+            })
         return result
 
     @staticmethod
@@ -587,7 +690,7 @@ class OutlookTokenProvider(_MailboxProvider):
             return value
 
     def _imap_messages(self, credential: dict[str, str]) -> list[dict[str, Any]]:
-        token = self._access_token(credential, OUTLOOK_IMAP_SCOPE)
+        token = self._access_token(credential, OUTLOOK_IMAP_SCOPE, with_scope=True)
         auth = f"user={credential['login_email']}\x01auth=Bearer {token}\x01\x01"
         client = imaplib.IMAP4_SSL(self.imap_host)
         try:
@@ -625,22 +728,29 @@ class OutlookTokenProvider(_MailboxProvider):
 
     def list_messages(self, address: str, provider_token: str = "") -> list[dict[str, Any]]:
         credential = self._credentials(provider_token)
-        errors: list[str] = []
+        errors: list[Exception] = []
         if self.mode in {"graph", "auto"}:
             try:
                 return self._graph_messages(credential)
-            except OutlookTokenError:
-                raise
             except Exception as exc:
                 if self.mode == "graph":
                     raise
-                errors.append(f"graph: {exc}")
+                errors.append(exc)
+        if self.mode == "auto":
+            try:
+                return self._outlook_rest_messages(credential)
+            except Exception as exc:
+                errors.append(exc)
         if self.mode in {"imap", "auto"}:
             try:
                 return self._imap_messages(credential)
             except Exception as exc:
-                errors.append(f"imap: {exc}")
-        raise RuntimeError("; ".join(errors) or "Microsoft mailbox read failed")
+                errors.append(exc)
+        if errors and all(isinstance(exc, OutlookTokenError) for exc in errors):
+            raise OutlookTokenError("; ".join(str(exc) for exc in errors))
+        raise RuntimeError("; ".join(
+            f"{type(exc).__name__}: {exc}" for exc in errors
+        ) or "Microsoft mailbox read failed")
 
     def message_content(self, message_id: str, provider_token: str = "") -> str:
         return ""

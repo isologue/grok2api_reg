@@ -63,6 +63,51 @@ class TempMailLolProviderTests(unittest.TestCase):
         self.assertIsNone(extract_verification_code("<style>.email { TEXT-SIZE: 14px; }</style>"))
 
 
+class OutlookCompatibilityTests(unittest.TestCase):
+    @staticmethod
+    def _response(status_code: int, payload: dict[str, object]) -> Mock:
+        response = Mock(status_code=status_code)
+        response.json.return_value = payload
+        return response
+
+    def test_refresh_tries_consumers_without_scope_before_common(self) -> None:
+        provider = OutlookTokenProvider({"type": "outlook_token", "mailboxes": "owner@hotmail.com----password----client----refresh"})
+        provider._session.post = Mock(side_effect=[
+            self._response(400, {"error": "invalid_grant", "error_description": "AADSTS70000"}),
+            self._response(200, {"access_token": "access-token"}),
+        ])
+        credential = {"email": "owner@hotmail.com", "client_id": "client", "refresh_token": "refresh", "login_email": "owner@hotmail.com"}
+
+        self.assertEqual(provider._access_token(credential, "offline_access https://graph.microsoft.com/Mail.Read"), "access-token")
+        calls = provider._session.post.call_args_list
+        self.assertEqual(calls[0].args[0], "https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+        self.assertEqual(calls[1].args[0], "https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        self.assertNotIn("scope", calls[0].kwargs["data"])
+        self.assertNotIn("scope", calls[1].kwargs["data"])
+        provider.close()
+
+    def test_auto_mode_uses_outlook_rest_after_graph_compatibility_failure(self) -> None:
+        provider = OutlookTokenProvider({"type": "outlook_token", "mailboxes": "owner@hotmail.com----password----client----refresh", "mode": "auto"})
+        provider._graph_messages = Mock(side_effect=RuntimeError("Graph does not accept legacy token"))
+        provider._outlook_rest_messages = Mock(return_value=[{"id": "legacy-message", "subject": "code", "content": "ABC-123"}])
+        token = '{"email":"owner@hotmail.com","client_id":"client","refresh_token":"refresh","login_email":"owner@hotmail.com"}'
+
+        messages = provider.list_messages("owner@hotmail.com", token)
+        self.assertEqual(messages[0]["id"], "legacy-message")
+        provider._outlook_rest_messages.assert_called_once()
+        provider.close()
+
+    def test_outlook_rest_message_is_normalised(self) -> None:
+        provider = OutlookTokenProvider({"type": "outlook_token", "mailboxes": "owner@hotmail.com----password----client----refresh", "mode": "auto"})
+        provider._access_token = Mock(return_value="legacy-access-token")
+        provider._session.get = Mock(return_value=self._response(200, {"value": [{"Id": "m1", "Subject": "Verify", "Body": {"Content": "Use ABC-123"}}]}))
+        credential = {"email": "owner@hotmail.com", "client_id": "client", "refresh_token": "refresh", "login_email": "owner@hotmail.com"}
+
+        self.assertEqual(provider._outlook_rest_messages(credential), [{"id": "m1", "subject": "Verify", "content": "Use ABC-123"}])
+        self.assertEqual(provider._session.get.call_args.args[0], "https://outlook.office.com/api/v2.0/me/messages")
+        provider.close()
+
+
 class OutlookPreflightTests(unittest.TestCase):
     def test_preflight_marks_only_definitive_token_failures_invalid(self) -> None:
         entry = {"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "alias_enabled": True, "alias_per_email": 1, "preflight_enabled": True}
@@ -75,6 +120,17 @@ class OutlookPreflightTests(unittest.TestCase):
             self.assertEqual(outcome, {"checked": 1, "available": 0, "invalid": 1, "transient": 0})
             self.assertEqual(state["owner@outlook.com"]["state"], "token_invalid")
             self.assertEqual(state["owner+c2api1@outlook.com"]["state"], "token_invalid")
+        provider.close()
+
+    def test_preflight_defers_transient_oauth_failures_without_marking_invalid(self) -> None:
+        entry = {"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "preflight_enabled": True}
+        provider = OutlookTokenProvider(entry)
+        provider.list_messages = Mock(side_effect=OutlookTokenError("Microsoft token refresh failed: consumers: ProxyError", definitive=False))
+        with tempfile.TemporaryDirectory() as tmp, patch("app.control.registration.mail._outlook_state_path", return_value=Path(tmp) / "outlook.json"):
+            outcome = provider.preflight()
+            from app.control.registration import mail
+            self.assertEqual(outcome, {"checked": 1, "available": 0, "invalid": 0, "transient": 1})
+            self.assertEqual(mail._read_outlook_state(), {})
         provider.close()
 
     def test_preflight_can_be_disabled_for_a_provider(self) -> None:

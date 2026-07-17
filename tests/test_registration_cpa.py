@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,7 +58,7 @@ class CpaExportTests(unittest.TestCase):
     def test_task_outputs_are_isolated_and_listed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cpa = {"enabled": True, "auth_dir": tmp}
-            task_id = "20260717_123456_abcdef"
+            task_id = f"test_{uuid.uuid4().hex}"
             initialize_cpa_task(cpa, task_id, started_at="2026-07-17T12:34:56+08:00", requested_count=2)
             task_file = Path(tmp) / task_id / "xai-user.json"
             task_file.parent.mkdir(parents=True, exist_ok=True)
