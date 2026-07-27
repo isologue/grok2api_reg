@@ -6,22 +6,21 @@ from app.control.account.runtime import get_refresh_service
 from app.dataplane.account.selector import current_strategy
 from app.platform.config.snapshot import get_config
 
-# Random strategy has no config key for retry count; it is pinned here so that
-# every retry-driven call site (chat / images / video / anthropic) sees the same
-# value without introducing scattered magic numbers.
-_RANDOM_MAX_RETRIES = 5
+_MAX_ACCOUNT_SWITCHES = 20
 
 
 def selection_max_retries() -> int:
-    """Retry count for account-swap loops, aware of the active selection strategy.
+    """Return the configured maximum number of replacement accounts per request.
 
-    - ``random`` strategy: fixed at :data:`_RANDOM_MAX_RETRIES` (=5).
-    - ``quota`` strategy:  reads ``retry.max_retries`` (default 1), preserving
-      the historical behaviour.
+    The value is read from the live configuration for every new request, so an
+    Admin update takes effect immediately without restarting the service.  It
+    applies to both quota and random selection strategies.
     """
-    if current_strategy() == "random":
-        return _RANDOM_MAX_RETRIES
-    return int(get_config("retry.max_retries", 1))
+    try:
+        configured = int(get_config("retry.max_retries", 1))
+    except (TypeError, ValueError):
+        configured = 1
+    return min(max(0, configured), _MAX_ACCOUNT_SWITCHES)
 
 
 def mode_candidates(spec: ModelSpec) -> tuple[int, ...]:

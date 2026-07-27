@@ -31,6 +31,7 @@ class FeedbackKind(StrEnum):
     FORBIDDEN    = "forbidden"      # 403 — account suspended / CF challenge
     RATE_LIMITED = "rate_limited"   # 429 — quota exhausted
     SERVER_ERROR = "server_error"   # 5xx — upstream fault
+    TRANSPORT_ERROR = "transport_error"  # proxy / network failure, not an account failure
     DISABLE      = "disable"        # operator-initiated disable
     DELETE       = "delete"         # operator-initiated delete
     RESTORE      = "restore"        # operator-initiated restore

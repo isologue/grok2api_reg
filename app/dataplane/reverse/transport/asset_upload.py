@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 import orjson
 
 from app.platform.logging.logger import logger
+from app.platform.logging.request_trace import (
+    fail_upstream_trace,
+    finish_upstream_trace,
+    start_upstream_trace,
+)
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError, ValidationError
 from app.dataplane.proxy import get_proxy_runtime
@@ -125,6 +130,16 @@ async def _upload_file_inner(
         "fileMimeType": mime,
         "content":      b64,
     })
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=_UPLOAD_URL,
+        payload={
+            "operation": "asset_upload",
+            "file_name": filename,
+            "mime_type": mime,
+            "base64_chars": len(b64),
+        },
+    )
     headers = build_http_headers(token, lease=lease)
     kwargs  = build_session_kwargs(lease=lease)
 
@@ -149,11 +164,19 @@ async def _upload_file_inner(
                 lease,
                 build_feedback(response.status_code, is_cloudflare=is_cloudflare),
             )
-            raise UpstreamError(
+            error = UpstreamError(
                 f"Asset upload returned {response.status_code}",
                 status = response.status_code,
                 body   = body_text,
             )
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=_UPLOAD_URL,
+                error=error,
+                status=response.status_code,
+            )
+            raise error
 
         await proxy.feedback(
             lease,
@@ -163,6 +186,13 @@ async def _upload_file_inner(
         result   = orjson.loads(body_bytes)
         file_id  = result.get("fileMetadataId") or result.get("fileId", "")
         file_uri = result.get("fileUri", "")
+        finish_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=_UPLOAD_URL,
+            response=result,
+            completed=True,
+        )
         logger.info("asset upload completed: filename={!r} file_id={}", filename, file_id)
         return file_id, file_uri
 
@@ -173,7 +203,15 @@ async def _upload_file_inner(
             lease,
             ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR),
         )
-        raise UpstreamError(f"Asset upload transport error: {exc}") from exc
+        error = UpstreamError(f"Asset upload transport error: {exc}")
+        fail_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=_UPLOAD_URL,
+            error=error,
+            status=error.status,
+        )
+        raise error from exc
 
 
 async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:

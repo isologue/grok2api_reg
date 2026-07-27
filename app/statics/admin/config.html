@@ -428,6 +428,22 @@ const SCHEMA_DEF = [
             desc: '按天轮转时最多保留的日志文件数量。默认 7。',
             descKey: 'config.schema.fields.logMaxFiles.desc',
           },
+          {
+            key: 'enabled',
+            section: 'logging.trace',
+            label: '启用请求调用追踪',
+            type: 'bool',
+            desc: '记录选中账号的脱敏标识、上游请求参数、SSE 返回内容及错误。记录可从日志查看页直接查看。',
+          },
+          {
+            key: 'max_chars',
+            section: 'logging.trace',
+            label: '调用内容最大字符数',
+            type: 'number',
+            min: 1024,
+            max: 1000000,
+            desc: '每条上游请求或响应记录的最大保存长度，默认 16000。超出部分会被截断。',
+          },
         ]
       },
     ]
@@ -503,7 +519,7 @@ const SCHEMA_DEF = [
         title: '配额刷新调度', titleKey: 'config.schema.groups.refreshSchedule',
         section: 'account.refresh',
         fields: [
-          { key: 'enabled', label: '启用配额刷新', labelKey: 'config.schema.fields.refreshEnabled.label', type: 'bool', desc: '开启后自动进入配额刷新模式，关闭后自动进入自动重试模式。', descKey: 'config.schema.fields.refreshEnabled.desc', help: '开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，出错自动换号重试最多 5 次。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。', helpKey: 'config.schema.fields.refreshEnabled.help' },
+          { key: 'enabled', label: '启用配额刷新', labelKey: 'config.schema.fields.refreshEnabled.label', type: 'bool', desc: '开启后自动进入配额刷新模式，关闭后自动进入自动重试模式。', descKey: 'config.schema.fields.refreshEnabled.desc', help: '开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，换号次数由“失败后最多更换账号数”控制。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。' },
           { key: 'basic_interval_sec', label: 'Basic 周期（秒）', labelKey: 'config.schema.fields.basicInterval.label', type: 'number', desc: 'basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 86400s。', descKey: 'config.schema.fields.basicInterval.desc' },
           { key: 'super_interval_sec', label: 'Super 周期（秒）', labelKey: 'config.schema.fields.superInterval.label', type: 'number', desc: 'super 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。', descKey: 'config.schema.fields.superInterval.desc' },
           { key: 'heavy_interval_sec', label: 'Heavy 周期（秒）', labelKey: 'config.schema.fields.heavyInterval.label', type: 'number', desc: 'heavy 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。', descKey: 'config.schema.fields.heavyInterval.desc' },
@@ -516,6 +532,13 @@ const SCHEMA_DEF = [
         section: 'account.selection',
         fields: [
           { key: 'max_inflight', label: '单号并发上限', labelKey: 'config.schema.fields.maxInflight.label', type: 'number', desc: '单个账号同时在执行的请求上限，超过则选号路径跳过该号（两种模式共用）。', descKey: 'config.schema.fields.maxInflight.desc' },
+        ]
+      },
+      {
+        title: '账号错误处理',
+        section: 'account.error',
+        fields: [
+          { key: 'forbidden_cooling_sec', label: '普通 403 冷却时间（秒）', type: 'number', min: 1, max: 86400, desc: '不含凭据失效标记的 403 会重建传输会话、短暂冷却当前账号，并尝试下一个账号。冷却期结束后自动恢复可选，不会永久禁用。' }
         ]
       },
       {
@@ -690,8 +713,8 @@ const SCHEMA_DEF = [
         title: '重试策略', titleKey: 'config.schema.groups.retry',
         section: 'retry',
         fields: [
-          { key: 'max_retries', label: '应用层重试上限', labelKey: 'config.schema.fields.maxRetries.label', type: 'number', desc: '请求失败后的应用层最大重试次数；0 表示不重试。适用于 chat.completions 与 responses 端点。', descKey: 'config.schema.fields.maxRetries.desc' },
-          { key: 'on_codes', label: '应用层重试触发状态码', labelKey: 'config.schema.fields.retryCodes.label', type: 'text', desc: '收到指定 HTTP 状态码时触发应用层重试，多个值请使用英文逗号分隔，例如 429,503。', descKey: 'config.schema.fields.retryCodes.desc' },
+          { key: 'max_retries', label: '失败后最多更换账号数', type: 'number', min: 0, max: 20, desc: '单次请求失败后，最多再尝试多少个不同账号。0 表示不更换账号；保存后对下一个请求立即生效。' },
+          { key: 'on_codes', label: '应用层换账号触发状态码', type: 'text', desc: '收到指定 HTTP 状态码时更换账号重试，多个值使用英文逗号分隔。默认包含 429,401,403,503。' },
           { key: 'reset_session_status_codes', label: '传输层会话重建状态码', labelKey: 'config.schema.fields.resetSessionCodes.label', type: 'text', desc: '收到指定 HTTP 状态码时自动重建传输层代理会话（Transport Session），多个值请使用英文逗号分隔。', descKey: 'config.schema.fields.resetSessionCodes.desc' },
         ]
       },

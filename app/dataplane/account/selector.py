@@ -138,6 +138,7 @@ def _quota_select(
     total_col  = table._total_col(mode_id)
     window_col = table._window_col(mode_id)
     inflight_col = table.inflight_by_idx
+    cooling_col = table.cooling_until_s_by_idx
     _maybe_reset_windows(
         table, candidates, mode_id,
         reset_col, quota_col, total_col, window_col,
@@ -152,6 +153,7 @@ def _quota_select(
         idx for idx in working
         if int(quota_col[idx]) > 0
         and int(inflight_col[idx]) < _QUOTA_MAX_INFLIGHT
+        and int(cooling_col[idx]) <= now_s
     }
     if not working:
         return None
@@ -178,6 +180,8 @@ def _quota_select_any(
     working = candidates.copy()
     if exclude_idxs:
         working -= exclude_idxs
+    cooling_col = table.cooling_until_s_by_idx
+    working = {idx for idx in working if int(cooling_col[idx]) <= now_s}
     if not working:
         return None
 

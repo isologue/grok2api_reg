@@ -275,12 +275,17 @@ class AccountDirectory:
                 fb.apply_status_change(table, idx, int(StatusId.EXPIRED))
 
             elif kind == FeedbackKind.FORBIDDEN:
-                fb.apply_forbidden(table, idx)
+                cooling_sec = _forbidden_cooling_sec()
+                fb.apply_forbidden(table, idx, cooling_sec=cooling_sec)
                 fb.update_last_fail(table, idx, ts)
 
             elif kind == FeedbackKind.SERVER_ERROR:
                 fb.apply_server_error(table, idx)
                 fb.update_last_fail(table, idx, ts)
+
+            elif kind == FeedbackKind.TRANSPORT_ERROR:
+                # Proxy/network failures are not evidence that this account is bad.
+                pass
 
             # Quota strategy may receive authoritative quota data from upstream
             # response headers; the random strategy ignores this entirely.
@@ -330,6 +335,14 @@ def _pool_cooling_sec(pool_id: int, mode_id: int = -1) -> int:
         pool_str, _POOL_INTERVAL_CONFIG["basic"]
     )
     return max(0, int(get_config(interval_key, default_interval)))
+
+
+def _forbidden_cooling_sec() -> int:
+    """Read the live 403 cooldown without allowing malformed config to break calls."""
+    try:
+        return min(max(1, int(get_config("account.error.forbidden_cooling_sec", 900))), 86_400)
+    except (TypeError, ValueError):
+        return 900
 
 
 # ---------------------------------------------------------------------------

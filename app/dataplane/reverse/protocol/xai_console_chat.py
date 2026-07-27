@@ -34,6 +34,13 @@ import orjson
 
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
+from app.platform.logging.request_trace import (
+    fail_upstream_trace,
+    finish_upstream_trace,
+    start_upstream_trace,
+    trace_enabled,
+    trace_max_chars,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -271,10 +278,7 @@ async def stream_console_chat(
     *,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[tuple[str, str], None]:
-    """POST to console.x.ai/v1/responses and yield (event_type, data) pairs.
-
-    走现有的 proxy lease + curl-cffi 体系，与 grok.com 共用 CF clearance。
-    """
+    """POST to console.x.ai/v1/responses and yield parsed SSE events."""
     from app.dataplane.proxy import get_proxy_runtime
     from app.dataplane.proxy.adapters.headers import build_console_headers
     from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
@@ -286,6 +290,11 @@ async def stream_console_chat(
     headers = build_console_headers(token, lease=lease)
     payload_bytes = orjson.dumps(payload)
     session_kwargs = build_session_kwargs(lease=lease)
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=CONSOLE_RESPONSES,
+        payload=payload,
+    )
 
     async with ResettableSession(**session_kwargs) as session:
         try:
@@ -298,7 +307,15 @@ async def stream_console_chat(
             )
         except Exception as exc:
             await proxy.feedback(lease, _transport_error_feedback())
-            raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
+            error = UpstreamError(f"Console transport failed: {exc}", status=502)
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CONSOLE_RESPONSES,
+                error=error,
+                status=error.status,
+            )
+            raise error from exc
 
         if response.status_code != 200:
             try:
@@ -306,34 +323,71 @@ async def stream_console_chat(
             except Exception:
                 body = ""
             await proxy.feedback(lease, _status_feedback(response.status_code))
-            raise UpstreamError(
+            error = UpstreamError(
                 f"Console API returned {response.status_code}",
                 status=response.status_code,
                 body=body,
             )
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CONSOLE_RESPONSES,
+                error=error,
+                status=response.status_code,
+            )
+            raise error
 
         await proxy.feedback(lease, _success_feedback())
 
         current_event = ""
+        response_lines: list[str] = []
+        trace_chars = 0
+        trace_limit = trace_max_chars() if trace_id and trace_enabled() else 0
+        completed = False
+        stream_failed = False
         try:
             async for raw_line in response.aiter_lines():
-                # curl-cffi 的 aiter_lines 返回 bytes，先解码为 str
                 if isinstance(raw_line, bytes):
-                    try:
-                        raw_line = raw_line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        raw_line = raw_line.decode("utf-8", errors="replace")
+                    raw_line = raw_line.decode("utf-8", errors="replace")
                 kind, value = classify_console_line(raw_line)
+                if trace_limit and trace_chars < trace_limit:
+                    record = (
+                        f"event: {current_event}\ndata: {value}"
+                        if kind == "data"
+                        else str(raw_line)
+                    )
+                    remaining = trace_limit - trace_chars
+                    response_lines.append(record[:remaining])
+                    trace_chars += min(len(record), remaining)
                 if kind == "event":
                     current_event = value
                 elif kind == "data":
                     yield current_event, value
                     current_event = ""
                 elif kind == "done":
+                    completed = True
                     return
+            completed = True
         except Exception as exc:
-            raise UpstreamError(f"Console stream read failed: {exc}", status=502) from exc
-
+            stream_failed = True
+            error = UpstreamError(f"Console stream read failed: {exc}", status=502)
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CONSOLE_RESPONSES,
+                error=error,
+                status=error.status,
+            )
+            raise error from exc
+        finally:
+            if not stream_failed:
+                finish_upstream_trace(
+                    trace_id,
+                    account_token=token,
+                    endpoint=CONSOLE_RESPONSES,
+                    response="\n".join(response_lines),
+                    completed=completed,
+                )
 
 def _success_feedback():
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind

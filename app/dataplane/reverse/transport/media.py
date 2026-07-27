@@ -6,6 +6,11 @@ All three endpoints are simple JSON POST calls with proxy lifecycle.
 import orjson
 
 from app.platform.logging.logger import logger
+from app.platform.logging.request_trace import (
+    fail_upstream_trace,
+    finish_upstream_trace,
+    start_upstream_trace,
+)
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
@@ -37,6 +42,11 @@ async def _post_with_proxy(
 
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.HTTP)
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=url,
+        payload={"operation": label, "payload": payload},
+    )
 
     try:
         result = await post_json(
@@ -53,17 +63,39 @@ async def _post_with_proxy(
             lease,
             upstream_feedback(exc),
         )
+        fail_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=url,
+            error=exc,
+            status=exc.status,
+        )
         raise
     except Exception as exc:
         await proxy.feedback(
             lease,
             ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR),
         )
-        raise UpstreamError(f"{label}: transport error: {exc}") from exc
+        error = UpstreamError(f"{label}: transport error: {exc}")
+        fail_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=url,
+            error=error,
+            status=error.status,
+        )
+        raise error from exc
 
     await proxy.feedback(
         lease,
         ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
+    )
+    finish_upstream_trace(
+        trace_id,
+        account_token=token,
+        endpoint=url,
+        response=result,
+        completed=True,
     )
     logger.debug("media request completed: operation={}", label)
     return result

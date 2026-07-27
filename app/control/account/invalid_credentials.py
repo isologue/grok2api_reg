@@ -20,14 +20,16 @@ async def mark_account_invalid_credentials(
     *,
     source: str,
 ) -> bool:
-    """Mark *token* as invalid when *exc* matches Grok invalid credentials."""
+    """Persist an account as expired for a real 401 or known invalid-token marker."""
     from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_error
 
-    if not is_invalid_credentials_error(exc):
+    status = getattr(exc, "status", None)
+    invalid_marker = is_invalid_credentials_error(exc)
+    if status != 401 and not invalid_marker:
         return False
 
     record = next(iter(await repo.get_accounts([token])), None)
-    reason = "invalid_credentials"
+    reason = "invalid_credentials" if invalid_marker else "unauthorized"
     ts = now_ms()
     ext = record.ext if record is not None else {}
 
@@ -48,13 +50,39 @@ async def mark_account_invalid_credentials(
         ]
     )
     logger.info(
-        "account expired from {}: token={}... status={} upstream_status={}",
+        "account expired from {}: token={}... reason={} upstream_status={}",
         source,
         token[:10],
-        AccountStatus.EXPIRED,
-        getattr(exc, "status", None) if isinstance(exc, UpstreamError) else None,
+        reason,
+        status,
     )
     return True
+
+
+def is_transport_error(exc: BaseException | None) -> bool:
+    """Return whether an error points to proxy/network transport, not the account."""
+    if not isinstance(exc, UpstreamError):
+        return False
+    text = " ".join(
+        [
+            str(exc),
+            str(exc.details.get("body", "") or ""),
+        ]
+    ).lower()
+    markers = (
+        "transport error",
+        "transport failed",
+        "connection error",
+        "connection reset",
+        "connect timeout",
+        "read timeout",
+        "timed out",
+        "network is unreachable",
+        "proxy error",
+        "tls error",
+        "ssl error",
+    )
+    return any(marker in text for marker in markers)
 
 
 def feedback_kind_for_error(exc: BaseException | None) -> FeedbackKind:
@@ -69,6 +97,8 @@ def feedback_kind_for_error(exc: BaseException | None) -> FeedbackKind:
 
     if is_invalid_credentials_error(exc):
         return FeedbackKind.UNAUTHORIZED
+    if is_transport_error(exc):
+        return FeedbackKind.TRANSPORT_ERROR
     status = getattr(exc, "status", 0)
     if status == 429:
         return FeedbackKind.RATE_LIMITED
@@ -79,4 +109,8 @@ def feedback_kind_for_error(exc: BaseException | None) -> FeedbackKind:
     return FeedbackKind.SERVER_ERROR
 
 
-__all__ = ["mark_account_invalid_credentials", "feedback_kind_for_error"]
+__all__ = [
+    "mark_account_invalid_credentials",
+    "is_transport_error",
+    "feedback_kind_for_error",
+]

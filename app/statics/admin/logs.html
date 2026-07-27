@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grok2API - &#26085;&#24535;&#26597;&#30475;</title>
+  <link rel="icon" href="/favicon.ico?v={{APP_VERSION}}">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <style>
+    body { background:#FAF9F5; }
+    .page-hd { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:20px; }
+    .page-title { font-size:22px; font-weight:700; line-height:1.2; }
+    .page-sub { margin-top:5px; color:var(--fg-muted); font-size:13px; }
+    .controls { display:grid; grid-template-columns:minmax(180px,1fr) minmax(170px,2fr) 106px auto auto auto; gap:9px; align-items:center; margin-bottom:14px; }
+    .controls .input { height:34px; border-radius:9px; }
+    .check-label { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; font-size:12px; color:#666; }
+    .check-label input { accent-color:#111; }
+    .btn-plain { height:34px; padding:0 13px; border:1px solid #e4e4e4; border-radius:9px; background:#fff; color:#333; font-size:12px; font-weight:600; white-space:nowrap; }
+    .btn-plain:hover { background:#f5f5f5; }
+    .btn-primary { background:#111; color:#fff; border-color:#111; }
+    .btn-primary:hover { background:#2a2a2a; }
+    .log-card { background:#151515; border-radius:14px; overflow:hidden; border:1px solid #262626; }
+    .log-meta { min-height:38px; padding:0 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; border-bottom:1px solid #292929; color:#999; font-size:12px; }
+    .log-meta strong { color:#e8e8e8; font-weight:600; }
+    .log-output { height:calc(100vh - 280px); min-height:400px; overflow:auto; margin:0; padding:14px 16px 20px; color:#d8d8d8; font:12px/1.6 'Geist Mono','SFMono-Regular',Consolas,monospace; white-space:pre-wrap; word-break:break-word; tab-size:2; }
+    .log-output .trace { color:#c8f0d2; }
+    .log-empty { color:#8f8f8f; }
+    .log-error { color:#ffbbb5; }
+    .hint { margin-top:10px; color:#898989; font-size:12px; line-height:1.6; }
+    @media (max-width:900px) {
+      .page-hd { flex-direction:column; }
+      .controls { grid-template-columns:1fr 1fr; }
+      .controls .search { grid-column:span 2; }
+      .log-output { height:calc(100vh - 390px); }
+    }
+  </style>
+</head>
+<body>
+  <div id="admin-header" data-active="/admin/logs"></div>
+  <main class="admin-main" style="padding-bottom:48px">
+    <div class="page-hd">
+      <div>
+        <div class="page-title">&#26085;&#24535;&#26597;&#30475;</div>
+        <div class="page-sub">&#26597;&#30475;&#24212;&#29992;&#26085;&#24535;&#12289;&#36873;&#21495;&#12289;&#19978;&#28216;&#35831;&#27714;&#21442;&#25968;&#19982;&#36820;&#22238;&#20869;&#23481;&#12290;&#36134;&#21495;&#20973;&#25454;&#20250;&#33073;&#25935;&#26174;&#31034;&#12290;</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <select class="input" id="log-file" aria-label="&#26085;&#24535;&#25991;&#20214;"></select>
+      <input class="input search" id="log-query" type="search" placeholder="&#31579;&#36873;&#65306;TRACE_UPSTREAM&#12289;model&#12289;&#38169;&#35823;&#20851;&#38190;&#23383;">
+      <select class="input" id="line-count" aria-label="&#34892;&#25968;">
+        <option value="200">200 &#34892;</option>
+        <option value="500" selected>500 &#34892;</option>
+        <option value="1000">1000 &#34892;</option>
+        <option value="2000">2000 &#34892;</option>
+      </select>
+      <label class="check-label"><input id="trace-only" type="checkbox">&#20165;&#30475;&#35831;&#27714;&#35843;&#29992;</label>
+      <label class="check-label"><input id="auto-refresh" type="checkbox" checked>&#33258;&#21160;&#21047;&#26032;</label>
+      <button class="btn-plain btn-primary" id="btn-refresh">&#21047;&#26032;</button>
+    </div>
+
+    <section class="log-card">
+      <div class="log-meta">
+        <span id="log-summary">&#27491;&#22312;&#21152;&#36733;&#26085;&#24535;&#8230;</span>
+        <button class="btn-plain" id="btn-copy">&#22797;&#21046;&#24403;&#21069;&#20869;&#23481;</button>
+      </div>
+      <pre class="log-output" id="log-output"></pre>
+    </section>
+    <div class="hint">TRACE_UPSTREAM &#35760;&#24405;&#21253;&#21547;&#36873;&#20013;&#36134;&#21495;&#30340;&#33073;&#25935;&#26631;&#35782;&#12289;&#19978;&#28216;&#35831;&#27714;&#25968;&#25454;&#12289;SSE &#36820;&#22238;&#20869;&#23481;&#21644;&#38169;&#35823;&#20449;&#24687;&#12290;&#22823;&#25991;&#26412;&#20250;&#25353;&#37197;&#32622;&#25130;&#26029;&#65292;&#20197;&#36991;&#20813;&#26085;&#24535;&#26080;&#38480;&#22686;&#38271;&#12290;</div>
+  </main>
+
+  <script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
+  <script>
+  const LOG_API = ADMIN_API + '/logs';
+  let refreshTimer = null;
+  let lastText = '';
+
+  function esc(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  async function api(path) {
+    const key = await adminKey.get();
+    const response = await fetch(LOG_API + path, { headers: { Authorization: `Bearer ${key || ''}` } });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+  }
+
+  function selectedFile() { return document.getElementById('log-file').value; }
+
+  async function loadFiles() {
+    const data = await api('/files');
+    const select = document.getElementById('log-file');
+    const previous = select.value;
+    select.innerHTML = '';
+    for (const item of data.files || []) {
+      const option = document.createElement('option');
+      option.value = item.name;
+      option.textContent = `${item.name} (${formatBytes(item.size)})`;
+      select.appendChild(option);
+    }
+    if (previous && [...select.options].some((item) => item.value === previous)) select.value = previous;
+    if (!select.value) throw new Error('暂无可读取的日志文件');
+  }
+
+  async function loadTail() {
+    const output = document.getElementById('log-output');
+    const summary = document.getElementById('log-summary');
+    const file = selectedFile();
+    if (!file) return;
+    const count = document.getElementById('line-count').value;
+    const query = document.getElementById('log-query').value.trim();
+    const traceOnly = document.getElementById('trace-only').checked;
+    const params = new URLSearchParams({ file, lines: count });
+    if (query) params.set('query', query);
+    if (traceOnly) params.set('trace_only', 'true');
+    summary.textContent = '正在读取日志…';
+    try {
+      const data = await api('/tail?' + params.toString());
+      const lines = data.lines || [];
+      lastText = lines.join('\n');
+      output.innerHTML = lines.length
+        ? lines.map((line) => `<span class="${line.includes('TRACE_UPSTREAM') ? 'trace' : ''}">${esc(line)}</span>`).join('\n')
+        : '<span class="log-empty">没有匹配的日志内容</span>';
+      summary.innerHTML = `<strong>${esc(data.file)}</strong> · ${lines.length} / ${data.matched} 行${data.truncated_source ? ' · 仅读取文件尾部 2 MB' : ''}`;
+      output.scrollTop = output.scrollHeight;
+    } catch (error) {
+      lastText = '';
+      output.innerHTML = `<span class="log-error">${esc(error.message || error)}</span>`;
+      summary.textContent = '日志读取失败';
+    }
+  }
+
+  function formatBytes(value) {
+    const size = Number(value || 0);
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function resetAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = null;
+    if (document.getElementById('auto-refresh').checked) {
+      refreshTimer = setInterval(loadTail, 5000);
+    }
+  }
+
+  document.getElementById('btn-refresh').addEventListener('click', async () => {
+    await loadFiles().catch(() => {});
+    await loadTail();
+  });
+  document.getElementById('auto-refresh').addEventListener('change', resetAutoRefresh);
+  document.getElementById('log-file').addEventListener('change', loadTail);
+  document.getElementById('line-count').addEventListener('change', loadTail);
+  document.getElementById('trace-only').addEventListener('change', loadTail);
+  document.getElementById('log-query').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') loadTail();
+  });
+  document.getElementById('btn-copy').addEventListener('click', async () => {
+    if (!lastText) return;
+    try { await navigator.clipboard.writeText(lastText); alert('已复制当前日志内容'); } catch { alert('复制失败'); }
+  });
+
+  (async () => {
+    await renderAdminHeader?.();
+    await renderSiteFooter?.();
+    const key = await adminKey.get();
+    if (!key || !await verifyKey(ADMIN_API + '/verify', key).catch(() => false)) {
+      location.href = '/admin/login';
+      return;
+    }
+    try {
+      await loadFiles();
+      await loadTail();
+      resetAutoRefresh();
+    } catch (error) {
+      document.getElementById('log-output').innerHTML = `<span class="log-error">${esc(error.message || error)}</span>`;
+    }
+  })();
+  </script>
+</body>
+</html>

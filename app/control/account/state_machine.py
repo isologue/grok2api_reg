@@ -21,8 +21,9 @@ class StatePolicy:
     """Configurable thresholds for automatic state transitions."""
 
     fail_threshold: int = 5  # consecutive failures → COOLING
-    forbidden_strikes: int = 1  # 403 count → DISABLED
+    forbidden_strikes: int = 1  # retained for backward compatibility
     default_cooling_ms: int = 15 * 60 * 1000  # 15 min
+    forbidden_cooling_ms: int = 15 * 60 * 1000
 
 
 _DEFAULT_POLICY = StatePolicy()
@@ -207,6 +208,7 @@ def apply_feedback(
         last_use_at = ts
     elif feedback.kind not in (
         FeedbackKind.SUCCESS,
+        FeedbackKind.TRANSPORT_ERROR,
         FeedbackKind.RESTORE,
         FeedbackKind.DISABLE,
         FeedbackKind.DELETE,
@@ -227,13 +229,13 @@ def apply_feedback(
             pass
 
     elif feedback.kind == FeedbackKind.FORBIDDEN:
-        strikes = int(ext.get(_FORBIDDEN_STRIKE_KEY, 0)) + 1
-        ext[_FORBIDDEN_STRIKE_KEY] = strikes
-        if strikes >= policy.forbidden_strikes:
-            status = AccountStatus.DISABLED
-            state_reason = feedback.reason or "forbidden"
-            ext[_DISABLED_AT_KEY] = ts
-            ext[_DISABLED_REASON_KEY] = state_reason
+        # A generic 403 is commonly a clearance or egress issue.  Cool it
+        # temporarily instead of permanently disabling a potentially healthy account.
+        cooldown_ms = feedback.retry_after_ms or policy.forbidden_cooling_ms
+        status = AccountStatus.COOLING
+        state_reason = feedback.reason or "forbidden_or_challenge"
+        ext[_COOLDOWN_UNTIL_KEY] = ts + cooldown_ms
+        ext[_COOLDOWN_REASON_KEY] = state_reason
 
     elif feedback.kind == FeedbackKind.RATE_LIMITED:
         cooldown_ms = (

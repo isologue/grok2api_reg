@@ -9,6 +9,13 @@ from urllib.parse import urlparse
 import orjson
 
 from app.platform.logging.logger import logger
+from app.platform.logging.request_trace import (
+    fail_upstream_trace,
+    finish_upstream_trace,
+    start_upstream_trace,
+    trace_enabled,
+    trace_max_chars,
+)
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
@@ -402,6 +409,11 @@ async def _stream_chat(
         request_overrides=request_overrides,
     )
     payload_bytes = orjson.dumps(payload)
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=CHAT,
+        payload=payload,
+    )
 
     headers = build_http_headers(
         token,
@@ -422,28 +434,69 @@ async def _stream_chat(
                 stream=True,
             )
         except Exception as exc:
-            raise _transport_upstream_error(
-                exc, context="Chat transport failed"
-            ) from exc
+            trace_error = _transport_upstream_error(exc, context="Chat transport failed")
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=trace_error,
+                status=trace_error.status,
+            )
+            raise trace_error from exc
 
         if response.status_code != 200:
             try:
                 body = response.content.decode("utf-8", "replace")[:400]
             except Exception:
                 body = ""
-            raise UpstreamError(
+            trace_error = UpstreamError(
                 f"Chat upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body,
             )
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=trace_error,
+                status=response.status_code,
+            )
+            raise trace_error
 
+        response_lines: list[str] = []
+        trace_chars = 0
+        trace_limit = trace_max_chars() if trace_id and trace_enabled() else 0
+        completed = False
+        stream_failed = False
         try:
             async for line in response.aiter_lines():
+                if trace_limit and trace_chars < trace_limit:
+                    text_line = str(line)
+                    remaining = trace_limit - trace_chars
+                    response_lines.append(text_line[:remaining])
+                    trace_chars += min(len(text_line), remaining)
                 yield line
+            completed = True
         except Exception as exc:
-            raise _transport_upstream_error(
-                exc, context="Chat stream read failed"
-            ) from exc
+            stream_failed = True
+            trace_error = _transport_upstream_error(exc, context="Chat stream read failed")
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=trace_error,
+                status=trace_error.status,
+            )
+            raise trace_error from exc
+        finally:
+            if not stream_failed:
+                finish_upstream_trace(
+                    trace_id,
+                    account_token=token,
+                    endpoint=CHAT,
+                    response="\n".join(response_lines),
+                    completed=completed,
+                )
 
 
 async def completions(

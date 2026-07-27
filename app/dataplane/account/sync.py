@@ -8,6 +8,7 @@ Two modes:
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import ms_to_s
 from app.control.account.models import AccountRecord
+from app.control.account.enums import AccountStatus
 from app.control.account.quota_defaults import normalize_quota_set
 from app.control.account.repository import AccountRepository
 from app.control.account.state_machine import derive_status
@@ -18,7 +19,20 @@ from .table import AccountRuntimeTable, make_empty_table
 def _record_to_slot_args(record: AccountRecord) -> dict:
     """Extract columnar values from a control-plane AccountRecord."""
     qs = normalize_quota_set(record.pool, record.quota_set())
-    status_id = STATUS_STR_TO_ID.get(str(derive_status(record)), int(StatusId.ACTIVE))
+    effective_status = derive_status(record)
+    cooldown_until_ms = 0
+    try:
+        cooldown_until_ms = max(0, int(record.ext.get("cooldown_until", 0) or 0))
+    except (TypeError, ValueError):
+        cooldown_until_ms = 0
+
+    # Keep a timed cooling account in the active index and let the selector
+    # filter its runtime cooldown.  This allows it to become selectable when
+    # the deadline passes without requiring a database write or service restart.
+    if effective_status == AccountStatus.COOLING and cooldown_until_ms > 0:
+        status_id = int(StatusId.ACTIVE)
+    else:
+        status_id = STATUS_STR_TO_ID.get(str(effective_status), int(StatusId.ACTIVE))
     pool_id = POOL_STR_TO_ID.get(record.pool, 0)
 
     def _reset_s(window) -> int:
@@ -67,6 +81,7 @@ def _record_to_slot_args(record: AccountRecord) -> dict:
         last_use_s      = ms_to_s(record.last_use_at)  if record.last_use_at  else 0,
         last_fail_s     = ms_to_s(record.last_fail_at) if record.last_fail_at else 0,
         fail_count      = record.usage_fail_count,
+        cooling_until_s  = (cooldown_until_ms + 999) // 1000 if cooldown_until_ms else 0,
         tags            = record.tags,
     )
     # fmt: on
@@ -84,8 +99,10 @@ async def bootstrap(repository: AccountRepository) -> AccountRuntimeTable:
             continue
         args = _record_to_slot_args(record)
         tags = args.pop("tags")
+        cooling_until_s = args.pop("cooling_until_s")
         _tags_by_token[record.token] = tags
-        table._append_slot(record.token, **args, tags=tags)
+        idx = table._append_slot(record.token, **args, tags=tags)
+        table.cooling_until_s_by_idx[idx] = cooling_until_s
 
     table.revision = snapshot.revision
     logger.info(
@@ -133,6 +150,7 @@ async def apply_changes(
 
             args = _record_to_slot_args(record)
             tags = args.pop("tags")
+            cooling_until_s = args.pop("cooling_until_s")
             existing = table.idx_by_token.get(record.token)
 
             if existing is not None:
@@ -142,8 +160,10 @@ async def apply_changes(
                     if existing in bucket:
                         old_tags.append(tag)
                 table._update_slot(existing, **args, old_tags=old_tags, new_tags=tags)
+                table.cooling_until_s_by_idx[existing] = cooling_until_s
             else:
-                table._append_slot(record.token, **args, tags=tags)
+                idx = table._append_slot(record.token, **args, tags=tags)
+                table.cooling_until_s_by_idx[idx] = cooling_until_s
 
             changed = True
 

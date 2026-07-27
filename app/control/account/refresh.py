@@ -421,10 +421,58 @@ class AccountRefreshService:
 
         try:
             if exc is not None:
+                from .invalid_credentials import is_transport_error
+
+                if is_transport_error(exc):
+                    logger.debug(
+                        "account failure ignored for transport error: token={}...", token[:10]
+                    )
+                    return
+
                 record = next(iter(await self._repo.get_accounts([token])), None)
                 if record is not None and await self._expire_invalid_credentials(
                     record, exc
                 ):
+                    return
+                if record is not None and getattr(exc, "status", None) == 403:
+                    now = now_ms()
+                    try:
+                        cooling_sec = min(
+                            max(
+                                1,
+                                int(
+                                    get_config(
+                                        "account.error.forbidden_cooling_sec", 900
+                                    )
+                                ),
+                            ),
+                            86_400,
+                        )
+                    except (TypeError, ValueError):
+                        cooling_sec = 900
+                    ext_data = record.ext or {}
+                    await self._repo.patch_accounts(
+                        [
+                            AccountPatch(
+                                token=token,
+                                status=AccountStatus.COOLING,
+                                usage_fail_delta=1,
+                                last_fail_at=now,
+                                last_fail_reason="forbidden_or_challenge",
+                                state_reason="forbidden_or_challenge",
+                                ext_merge={
+                                    **ext_data,
+                                    "cooldown_until": now + cooling_sec * 1000,
+                                    "cooldown_reason": "forbidden_or_challenge",
+                                },
+                            )
+                        ]
+                    )
+                    logger.info(
+                        "account cooled after 403: token={}... cooldown_sec={}",
+                        token[:10],
+                        cooling_sec,
+                    )
                     return
                 if (
                     record is not None

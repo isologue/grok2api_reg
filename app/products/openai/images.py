@@ -13,6 +13,13 @@ from urllib.parse import urlparse
 import orjson
 
 from app.platform.logging.logger import logger
+from app.platform.logging.request_trace import (
+    fail_upstream_trace,
+    finish_upstream_trace,
+    start_upstream_trace,
+    trace_enabled,
+    trace_max_chars,
+)
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
@@ -90,6 +97,108 @@ class _ImageOutput:
 
 def _clamp_progress(value: int) -> int:
     return max(0, min(100, int(value)))
+
+
+def _unwrap_task_group_error(exc: BaseException) -> BaseException:
+    """Return the most useful root exception from an asyncio TaskGroup."""
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            unwrapped = _unwrap_task_group_error(child)
+            if isinstance(unwrapped, (ValidationError, UpstreamError, RateLimitError)):
+                return unwrapped
+        for child in exc.exceptions:
+            unwrapped = _unwrap_task_group_error(child)
+            if not isinstance(unwrapped, asyncio.CancelledError):
+                return unwrapped
+    return exc
+
+
+async def _traced_ws_image_stream(
+    token: str,
+    prompt: str,
+    *,
+    aspect_ratio: str,
+    n: int,
+    enable_nsfw: bool,
+    enable_pro: bool,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Wrap image WebSocket events in the common upstream trace format."""
+    from app.dataplane.reverse.protocol.xai_image import WS_IMAGINE_URL
+
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=WS_IMAGINE_URL,
+        payload={
+            "operation": "image_generation_websocket",
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "count": n,
+            "enable_nsfw": enable_nsfw,
+            "enable_pro": enable_pro,
+        },
+    )
+    events: list[str] = []
+    trace_chars = 0
+    trace_limit = trace_max_chars() if trace_id and trace_enabled() else 0
+    completed = False
+    failed = False
+    try:
+        async for event in stream_images(
+            token,
+            prompt,
+            aspect_ratio=aspect_ratio,
+            n=n,
+            enable_nsfw=enable_nsfw,
+            enable_pro=enable_pro,
+        ):
+            event_type = str(event.get("type") or "")
+            summary = {
+                key: event[key]
+                for key in (
+                    "type", "image_id", "order", "stage", "progress", "url",
+                    "width", "height", "is_final", "moderated", "r_rated",
+                    "error_code", "error",
+                )
+                if key in event
+            }
+            if "blob" in event:
+                summary["blob_chars"] = len(str(event.get("blob") or ""))
+            if trace_limit and trace_chars < trace_limit:
+                encoded = orjson.dumps(summary).decode("utf-8", "replace")
+                remaining = trace_limit - trace_chars
+                events.append(encoded[:remaining])
+                trace_chars += min(len(encoded), remaining)
+            if event_type == "error":
+                failed = True
+                error = UpstreamError(str(event.get("error") or "Image WebSocket request failed"))
+                fail_upstream_trace(
+                    trace_id,
+                    account_token=token,
+                    endpoint=WS_IMAGINE_URL,
+                    error=error,
+                    status=error.status,
+                )
+            yield event
+        completed = not failed
+    except BaseException as exc:
+        failed = True
+        fail_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=WS_IMAGINE_URL,
+            error=exc,
+            status=getattr(exc, "status", None),
+        )
+        raise
+    finally:
+        if not failed:
+            finish_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=WS_IMAGINE_URL,
+                response=events,
+                completed=completed,
+            )
 
 
 def _compute_progress_percent(progress_map: dict[object, int], total: int) -> int:
@@ -330,7 +439,7 @@ async def generate(
             completed_ids: set[object] = set()
             last_progress = -1
             try:
-                async for ev in stream_images(
+                async for ev in _traced_ws_image_stream(
                     token, prompt,
                     aspect_ratio = aspect_ratio,
                     n            = n,
@@ -405,7 +514,7 @@ async def generate(
     success = False
     fail_exc: BaseException | None = None
     try:
-        async for ev in stream_images(
+        async for ev in _traced_ws_image_stream(
             token, prompt,
             aspect_ratio = aspect_ratio,
             n            = n,
@@ -667,9 +776,12 @@ async def _prepare_edit_references(
     async def _runner(index: int, image_input: str) -> None:
         results[index] = await _prepare_edit_reference(token, image_input, index)
 
-    async with asyncio.TaskGroup() as tg:
-        for index, image_input in enumerate(image_inputs):
-            tg.create_task(_runner(index, image_input), name=f"image-edit-ref-{index}")
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for index, image_input in enumerate(image_inputs):
+                tg.create_task(_runner(index, image_input), name=f"image-edit-ref-{index}")
+    except BaseExceptionGroup as exc:
+        raise _unwrap_task_group_error(exc) from exc
 
     return [result for result in results if result is not None]
 
@@ -891,6 +1003,102 @@ async def _collect_edit_images(
     return images[:requested_n]
 
 
+async def _stream_image_chat_request(
+    *,
+    token: str,
+    payload: dict[str, Any],
+    referer: str,
+    timeout_s: float,
+    operation: str,
+) -> AsyncGenerator[str, None]:
+    """Stream an image-related app-chat call with bounded upstream tracing."""
+    proxy = await get_proxy_runtime()
+    lease = await proxy.acquire()
+    headers = build_http_headers(
+        token,
+        lease=lease,
+        origin="https://grok.com",
+        referer=referer,
+    )
+    kwargs = build_session_kwargs(lease=lease)
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=CHAT,
+        payload={"operation": operation, "payload": payload},
+    )
+
+    async with ResettableSession(**kwargs) as session:
+        try:
+            response = await session.post(
+                CHAT,
+                headers=headers,
+                data=orjson.dumps(payload),
+                timeout=timeout_s,
+                stream=True,
+            )
+        except Exception as exc:
+            error = UpstreamError(f"{operation} transport failed: {exc}", status=502)
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=error.status,
+            )
+            raise error from exc
+
+        if response.status_code != 200:
+            body = response.content.decode("utf-8", "replace")[:400]
+            error = UpstreamError(
+                f"{operation} upstream returned {response.status_code}",
+                status=response.status_code,
+                body=body,
+            )
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=response.status_code,
+            )
+            raise error
+
+        response_lines: list[str] = []
+        trace_chars = 0
+        trace_limit = trace_max_chars() if trace_id and trace_enabled() else 0
+        completed = False
+        stream_failed = False
+        try:
+            async for line in response.aiter_lines():
+                if trace_limit and trace_chars < trace_limit:
+                    text_line = str(line)
+                    remaining = trace_limit - trace_chars
+                    response_lines.append(text_line[:remaining])
+                    trace_chars += min(len(text_line), remaining)
+                yield line
+            completed = True
+        except Exception as exc:
+            stream_failed = True
+            error = UpstreamError(f"{operation} stream read failed: {exc}", status=502)
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=error.status,
+            )
+            raise error from exc
+        finally:
+            if not stream_failed:
+                finish_upstream_trace(
+                    trace_id,
+                    account_token=token,
+                    endpoint=CHAT,
+                    response="\n".join(response_lines),
+                    completed=completed,
+                )
+
+
 async def _stream_image_edit(
     token: str,
     prompt: str,
@@ -899,38 +1107,19 @@ async def _stream_image_edit(
     *,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
-    proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
     payload = build_image_edit_payload(
         prompt=prompt,
         image_references=image_references,
         parent_post_id=parent_post_id,
     )
-    headers = build_http_headers(
-        token,
-        lease=lease,
-        origin="https://grok.com",
+    async for line in _stream_image_chat_request(
+        token=token,
+        payload=payload,
         referer=f"https://grok.com/imagine/post/{parent_post_id}",
-    )
-    kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
-        response = await session.post(
-            CHAT,
-            headers=headers,
-            data=orjson.dumps(payload),
-            timeout=timeout_s,
-            stream=True,
-        )
-        if response.status_code != 200:
-            body = response.content.decode("utf-8", "replace")[:300]
-            raise UpstreamError(
-                f"Image-edit upstream returned {response.status_code}",
-                status=response.status_code,
-                body=body,
-            )
-        async for line in response.aiter_lines():
-            yield line
+        timeout_s=timeout_s,
+        operation="image_edit",
+    ):
+        yield line
 
 
 async def _stream_lite_generate(
@@ -940,34 +1129,20 @@ async def _stream_lite_generate(
     *,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
-    proxy   = await get_proxy_runtime()
-    lease   = await proxy.acquire()
     payload = build_chat_payload(
         message           = f"Drawing: {message}",
         mode_id           = mode_id,
         file_attachments  = [],
         request_overrides = {"imageGenerationCount": 2},
     )
-    headers = build_http_headers(token, lease=lease)
-    kwargs  = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
-        response = await session.post(
-            CHAT,
-            headers = headers,
-            data    = orjson.dumps(payload),
-            timeout = timeout_s,
-            stream  = True,
-        )
-        if response.status_code != 200:
-            body = response.content.decode("utf-8", "replace")[:300]
-            raise UpstreamError(
-                f"Image-generation upstream returned {response.status_code}",
-                status = response.status_code,
-                body   = body,
-            )
-        async for line in response.aiter_lines():
-            yield line
+    async for line in _stream_image_chat_request(
+        token=token,
+        payload=payload,
+        referer="https://grok.com/",
+        timeout_s=timeout_s,
+        operation="image_generation_lite",
+    ):
+        yield line
 
 
 async def _run_lite_request(
@@ -1095,9 +1270,12 @@ async def _run_lite_batch(
             progress_cb=None if progress_cb is None else lambda progress: progress_cb(idx, progress),
         )
 
-    async with asyncio.TaskGroup() as tg:
-        for idx in range(n):
-            tg.create_task(_runner(idx), name=f"lite-image-{idx}")
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for idx in range(n):
+                tg.create_task(_runner(idx), name=f"lite-image-{idx}")
+    except BaseExceptionGroup as exc:
+        raise _unwrap_task_group_error(exc) from exc
 
     return [result for result in results if result is not None]
 

@@ -161,7 +161,7 @@ async def _apply_feedback_and_release(
             ResultCategory.AUTH_FAILURE: FeedbackKind.UNAUTHORIZED,
             ResultCategory.FORBIDDEN: FeedbackKind.FORBIDDEN,
             ResultCategory.UPSTREAM_5XX: FeedbackKind.SERVER_ERROR,
-            ResultCategory.TRANSPORT_ERR: FeedbackKind.SERVER_ERROR,
+            ResultCategory.TRANSPORT_ERR: FeedbackKind.TRANSPORT_ERROR,
             ResultCategory.UNKNOWN: FeedbackKind.SERVER_ERROR,
         }
         fb_kind = _CATEGORY_TO_FEEDBACK.get(result.category)

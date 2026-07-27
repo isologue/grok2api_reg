@@ -26,6 +26,13 @@ from app.platform.errors import (
     ValidationError,
 )
 from app.platform.logging.logger import logger
+from app.platform.logging.request_trace import (
+    fail_upstream_trace,
+    finish_upstream_trace,
+    start_upstream_trace,
+    trace_enabled,
+    trace_max_chars,
+)
 from app.platform.runtime.clock import now_s
 from app.platform.storage import save_local_video
 from app.control.account.enums import FeedbackKind
@@ -325,6 +332,7 @@ async def _stream_video_request(
     referer: str,
     timeout_s: float,
 ) -> AsyncGenerator[str, None]:
+    """Stream one video app-chat request and persist a bounded trace."""
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire()
     headers = build_http_headers(
@@ -335,24 +343,82 @@ async def _stream_video_request(
         lease=lease,
     )
     kwargs = build_session_kwargs(lease=lease)
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=CHAT,
+        payload={"operation": "video_generation", "payload": payload},
+    )
 
     async with ResettableSession(**kwargs) as session:
-        response = await session.post(
-            CHAT,
-            headers=headers,
-            data=orjson.dumps(payload),
-            timeout=timeout_s,
-            stream=True,
-        )
+        try:
+            response = await session.post(
+                CHAT,
+                headers=headers,
+                data=orjson.dumps(payload),
+                timeout=timeout_s,
+                stream=True,
+            )
+        except Exception as exc:
+            error = UpstreamError(f"Video transport failed: {exc}", status=502)
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=error.status,
+            )
+            raise error from exc
+
         if response.status_code != 200:
-            body = response.content.decode("utf-8", "replace")[:300]
-            raise UpstreamError(
+            body = response.content.decode("utf-8", "replace")[:400]
+            error = UpstreamError(
                 f"Video upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body,
             )
-        async for line in response.aiter_lines():
-            yield line
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=response.status_code,
+            )
+            raise error
+
+        response_lines: list[str] = []
+        trace_chars = 0
+        trace_limit = trace_max_chars() if trace_id and trace_enabled() else 0
+        completed = False
+        stream_failed = False
+        try:
+            async for line in response.aiter_lines():
+                if trace_limit and trace_chars < trace_limit:
+                    text_line = str(line)
+                    remaining = trace_limit - trace_chars
+                    response_lines.append(text_line[:remaining])
+                    trace_chars += min(len(text_line), remaining)
+                yield line
+            completed = True
+        except Exception as exc:
+            stream_failed = True
+            error = UpstreamError(f"Video stream read failed: {exc}", status=502)
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=error.status,
+            )
+            raise error from exc
+        finally:
+            if not stream_failed:
+                finish_upstream_trace(
+                    trace_id,
+                    account_token=token,
+                    endpoint=CHAT,
+                    response="\n".join(response_lines),
+                    completed=completed,
+                )
 
 
 def _absolutize_video_url(url: str) -> str:

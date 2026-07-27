@@ -78,8 +78,13 @@ def apply_auth_failure(table: AccountRuntimeTable, idx: int) -> None:
     _adjust_health(table, idx, _AUTH_FACTOR)
 
 
-def apply_forbidden(table: AccountRuntimeTable, idx: int) -> None:
-    """Reduce health heavily on 403."""
+def apply_forbidden(
+    table: AccountRuntimeTable, idx: int, *, cooling_sec: int
+) -> None:
+    """Cool a generic 403 temporarily while preserving the account."""
+    ts = now_s() + max(0, cooling_sec)
+    cooling_col = table.cooling_until_s_by_idx
+    cooling_col[idx] = max(int(cooling_col[idx]), ts)
     _adjust_health(table, idx, _FORBIDDEN_FACTOR)
 
 

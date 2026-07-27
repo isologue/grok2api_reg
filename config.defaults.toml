@@ -19,6 +19,12 @@ file_level = "INFO"
 # 日志文件最大保留数量（按天轮转）
 max_files = 7
 
+[logging.trace]
+# 记录上游请求的脱敏参数、选中账号标识与返回内容，可从管理后台日志页查看。
+enabled = true
+# 单条请求或响应日志最多保存字符数，超出部分会被截断。
+max_chars = 16000
+
 
 # ==================== 应用功能 ====================
 [features]
@@ -106,10 +112,13 @@ refresh_interval = 3600
 [retry]
 # [Transport 层] 触发重建代理 Session 的 HTTP 状态码
 reset_session_status_codes = [403]
-# [App 层] 换账号重试最大次数（0 = 不重试）
+# [App 层] 单次请求失败后最多更换的账号数（0 = 不换号）
+# 保存管理后台配置后，对下一个请求立即生效。
+
 max_retries = 1
-# [App 层] 触发换账号重试的 HTTP 状态码，英文逗号分隔
-on_codes = "429,401,503"
+# [App 层] 触发换账号重试的 HTTP 状态码，英文逗号分隔（默认包含 403）
+# 普通 403 会重建传输 Session、短暂冷却当前账号，再尝试下一个账号。
+on_codes = "429,401,403,503"
 
 
 [account.refresh]
@@ -132,6 +141,10 @@ vacuum = false   # 默认禁用，避免大库 VACUUM 锁全库（5-30s）；需
 [account.selection]
 # 单号并发上限（两模式共用）
 max_inflight = 8
+
+[account.error]
+# 普通 403 的账号冷却时间（秒）；到期后自动恢复可选。
+forbidden_cooling_sec = 900
 
 
 # ==================== 对话配置 ====================
