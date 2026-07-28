@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import secrets
+import threading
+import time
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 import orjson
 
 from app.platform.config.snapshot import get_config
 from .logger import logger
+
+
+_AUDIT_LOCK = threading.RLock()
+_AUDIT_CONTEXT: dict[str, dict[str, Any]] = {}
+_AUDIT_CONTEXT_LIMIT = 2_000
 
 
 _SENSITIVE_EXACT_KEYS = frozenset(
@@ -64,6 +72,85 @@ def trace_max_chars() -> int:
     except (TypeError, ValueError):
         value = 16_000
     return min(max(value, 1_024), 1_000_000)
+
+
+def audit_enabled() -> bool:
+    """Return whether the persistent request-audit journal is enabled."""
+    return get_config().get_bool("logging.audit.enabled", True)
+
+
+def _trace_audit_context(*, trace_id: str, account_token: str, endpoint: str, payload: Any) -> None:
+    """Retain bounded metadata until the matching response/error trace arrives."""
+    if not audit_enabled() or "cli-chat-proxy.grok.com" in endpoint:
+        # Grok Build records richer audits in app.products.build.service.
+        return
+    parsed = urlparse(endpoint)
+    operation = "upstream"
+    public_model = ""
+    upstream_model = ""
+    streaming = False
+    if isinstance(payload, Mapping):
+        operation = str(payload.get("operation") or operation)
+        nested = payload.get("payload")
+        public_model = str(payload.get("model") or "")
+        streaming = bool(payload.get("stream"))
+        if isinstance(nested, Mapping):
+            public_model = public_model or str(nested.get("model") or "")
+            streaming = streaming or bool(nested.get("stream"))
+    if "console.x.ai" in parsed.netloc:
+        provider = "console"
+        operation = "responses" if operation == "upstream" else operation
+    elif "imagine" in operation or "image" in operation:
+        provider = "image"
+    elif "video" in operation:
+        provider = "video"
+    else:
+        provider = "grok"
+        if operation == "upstream" and "app-chat" in parsed.path:
+            operation = "chat"
+    context = {
+        "provider": provider,
+        "operation": operation,
+        "public_model": public_model,
+        "upstream_model": upstream_model or public_model,
+        "account": _mask_account(account_token),
+        "endpoint": endpoint,
+        "request": payload,
+        "streaming": streaming,
+        "started": time.monotonic(),
+    }
+    with _AUDIT_LOCK:
+        if len(_AUDIT_CONTEXT) >= _AUDIT_CONTEXT_LIMIT:
+            _AUDIT_CONTEXT.pop(next(iter(_AUDIT_CONTEXT)), None)
+        _AUDIT_CONTEXT[trace_id] = context
+
+
+def _finish_trace_audit(trace_id: str | None, *, response: Any = None, error: BaseException | str | None = None, status: int | None = None) -> None:
+    if not trace_id:
+        return
+    with _AUDIT_LOCK:
+        context = _AUDIT_CONTEXT.pop(trace_id, None)
+    if context is None:
+        return
+    try:
+        from app.platform.request_audit import record
+        duration_ms = int(max(0.0, time.monotonic() - float(context["started"])) * 1000)
+        record(
+            provider=str(context["provider"]),
+            operation=str(context["operation"]),
+            public_model=str(context["public_model"]),
+            upstream_model=str(context["upstream_model"]),
+            account=str(context["account"]),
+            endpoint=str(context["endpoint"]),
+            status_code=int(status if status is not None else (502 if error else 200)),
+            streaming=bool(context.get("streaming")),
+            duration_ms=duration_ms,
+            request=context["request"],
+            response=response,
+            error=str(error or ""),
+        )
+    except Exception as exc:  # Audit failures must never break the actual request.
+        logger.debug("request audit write skipped: {}", exc)
 
 
 def _mask_account(token: str) -> str:
@@ -121,22 +208,24 @@ def start_upstream_trace(
     endpoint: str,
     payload: Any,
 ) -> str | None:
-    """Write a redacted request record and return its correlation ID."""
-    if not trace_enabled():
+    """Write a redacted request trace and begin a persistent audit item."""
+    if not trace_enabled() and not audit_enabled():
         return None
     trace_id = secrets.token_hex(6)
-    logger.info(
-        "TRACE_UPSTREAM {}",
-        _bounded_json(
-            {
-                "event": "request",
-                "trace_id": trace_id,
-                "account": _mask_account(account_token),
-                "endpoint": endpoint,
-                "payload": payload,
-            }
-        ),
-    )
+    _trace_audit_context(trace_id=trace_id, account_token=account_token, endpoint=endpoint, payload=payload)
+    if trace_enabled():
+        logger.info(
+            "TRACE_UPSTREAM {}",
+            _bounded_json(
+                {
+                    "event": "request",
+                    "trace_id": trace_id,
+                    "account": _mask_account(account_token),
+                    "endpoint": endpoint,
+                    "payload": payload,
+                }
+            ),
+        )
     return trace_id
 
 
@@ -148,8 +237,11 @@ def finish_upstream_trace(
     response: Any,
     completed: bool,
 ) -> None:
-    """Write bounded response content for a previously traced upstream request."""
+    """Write bounded response content and finish the matching audit item."""
     if not trace_id:
+        return
+    _finish_trace_audit(trace_id, response=response, status=200)
+    if not trace_enabled():
         return
     logger.info(
         "TRACE_UPSTREAM {}",
@@ -174,21 +266,13 @@ def fail_upstream_trace(
     error: BaseException | str,
     status: int | None = None,
 ) -> None:
-    """Write a bounded failure record without exposing credentials.
-
-    ``UpstreamError`` stores a short upstream response excerpt in ``details``.
-    Keep that excerpt in the trace as well: it is usually the decisive clue for
-    a 4xx/5xx response, while the normal redaction and length limits still
-    apply.
-    """
+    """Write bounded failure content and finish the matching audit item."""
     if not trace_id:
         return
-
+    _finish_trace_audit(trace_id, error=error, status=status)
+    if not trace_enabled():
+        return
     details = getattr(error, "details", None)
-    upstream_body = ""
-    if isinstance(details, Mapping):
-        upstream_body = details.get("body", "")
-
     logger.warning(
         "TRACE_UPSTREAM {}",
         _bounded_json(
@@ -198,8 +282,8 @@ def fail_upstream_trace(
                 "account": _mask_account(account_token),
                 "endpoint": endpoint,
                 "status": status,
-                "error": _bounded_text(error),
-                "upstream_body": _bounded_text(upstream_body),
+                "error": str(error),
+                "details": details,
             }
         ),
     )
@@ -207,6 +291,7 @@ def fail_upstream_trace(
 
 __all__ = [
     "trace_enabled",
+    "audit_enabled",
     "trace_max_chars",
     "start_upstream_trace",
     "finish_upstream_trace",

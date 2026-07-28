@@ -58,9 +58,21 @@ async def admin_config():
 async def admin_cache():
     return _serve_html("admin/cache.html")
 
+@router.get("/admin/audits", include_in_schema=False)
+async def admin_audits():
+    return _serve_html("admin/audits.html")
+
+@router.get("/admin/model-routes", include_in_schema=False)
+async def admin_model_routes():
+    return _serve_html("admin/model-routes.html")
+
 @router.get("/admin/logs", include_in_schema=False)
 async def admin_logs():
     return _serve_html("admin/logs.html")
+
+@router.get("/admin/build", include_in_schema=False)
+async def admin_build():
+    return RedirectResponse("/admin/account#build-accounts", status_code=308)
 
 @router.get("/admin/register", include_in_schema=False)
 async def admin_register():

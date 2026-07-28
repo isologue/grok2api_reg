@@ -55,6 +55,10 @@ MODELS: tuple[ModelSpec, ...] = (
     # Super+
     ModelSpec("grok-imagine-video",                     ModeId.AUTO,     Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
 
+    # === Grok Build (CLI OAuth / CPA Auth) =================================
+    # OAuth-backed Grok Build models imported from CPA Auth.
+    ModelSpec("grok-4.5",                              ModeId.BUILD,    Tier.BASIC, Capability.BUILD_CHAT, True, "Grok 4.5 (Build)"),
+
     # === Console Chat (console.x.ai/v1/responses) ===========================
     # 通过 console.x.ai 路由，使用 grok.com SSO token，免费账号可用
     # basic pool 即可（不消耗 grok.com 配额，走 console API 独立配额）
@@ -90,27 +94,43 @@ for _m in MODELS:
 # ---------------------------------------------------------------------------
 
 
+def _build_route_spec(model_name: str) -> ModelSpec | None:
+    """Return a synthetic spec for an enabled public Grok Build route."""
+    from app.control.build.routes import store as build_routes
+    route = build_routes.get(model_name)
+    if route is None or not route.enabled:
+        return None
+    return ModelSpec(route.public_id, ModeId.BUILD, Tier.BASIC, Capability.BUILD_CHAT, True, f"Grok Build ({route.upstream_model})")
+
+
 def get(model_name: str) -> ModelSpec | None:
-    """Return the spec for *model_name*, or ``None`` if not registered."""
-    return _BY_NAME.get(model_name)
+    """Return static metadata or a persisted Build public-route spec."""
+    return _BY_NAME.get(model_name) or _build_route_spec(model_name)
 
 
 def resolve(model_name: str) -> ModelSpec:
     """Return the spec for *model_name*; raise ``ValueError`` if unknown."""
-    spec = _BY_NAME.get(model_name)
+    spec = get(model_name)
     if spec is None:
         raise ValueError(f"Unknown model: {model_name!r}")
     return spec
 
 
 def list_enabled() -> list[ModelSpec]:
-    """Return all enabled models in registration order."""
-    return [m for m in MODELS if m.enabled]
+    """Return static models plus enabled custom/discovered Grok Build routes."""
+    models = [m for m in MODELS if m.enabled]
+    static_names = {m.model_name.lower() for m in models}
+    from app.control.build.routes import store as build_routes
+    for route in build_routes.list():
+        if route["public_id"].lower() in static_names or not route["enabled"]:
+            continue
+        models.append(ModelSpec(route["public_id"], ModeId.BUILD, Tier.BASIC, Capability.BUILD_CHAT, True, f"Grok Build ({route['upstream_model']})"))
+    return models
 
 
 def list_by_capability(cap: Capability) -> list[ModelSpec]:
     """Return enabled models that include *cap* in their capability mask."""
-    return [m for m in MODELS if m.enabled and bool(m.capability & cap)]
+    return [m for m in list_enabled() if bool(m.capability & cap)]
 
 
 __all__ = ["MODELS", "get", "resolve", "list_enabled", "list_by_capability"]

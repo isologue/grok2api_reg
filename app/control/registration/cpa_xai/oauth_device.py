@@ -81,12 +81,20 @@ def _is_transient_net_error(exc: BaseException) -> bool:
             "temporarily unavailable",
             "network is unreachable",
             "name or service not known",
+            "temporary failure in name resolution",
             "unexpected_eof",
             "eof occurred",
             "ssl",
             "handshake",
             "remote end closed",
             "bad gateway",
+            # Privoxy returns this as urllib.URLError rather than HTTPError.
+            # An already-approved device grant is still valid, so keep polling
+            # through a short WARP/Privoxy reconnect instead of discarding it.
+            "tunnel connection failed",
+            "internal privoxy error",
+            "privoxy error",
+            "proxy error",
             "connection refused",
         )
         return any(n in msg for n in needles)

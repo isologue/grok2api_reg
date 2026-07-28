@@ -210,6 +210,7 @@ class LocalAccountRepository:
             "fail_count": cls._payload_int(row["usage_fail_count"]),
             "last_used_at": row["last_use_at"],
             "tags": cls._parse_tags(row["tags"]),
+            "has_registration_archive": bool(row["has_registration_archive"]),
         }
 
     def _upsert_sync(
@@ -587,6 +588,11 @@ class LocalAccountRepository:
                 usage_use_count,
                 usage_fail_count,
                 last_use_at,
+                CASE
+                    WHEN json_valid(ext)
+                     AND json_type(ext, '$.registration_archive.ciphertext') = 'text'
+                    THEN 1 ELSE 0
+                END AS has_registration_archive,
                 {quota_select}
             FROM {_TBL}
             WHERE deleted_at IS NULL

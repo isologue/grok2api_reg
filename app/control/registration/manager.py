@@ -30,6 +30,7 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "mail": {"providers": []},
     "cpa": {
         "enabled": False,
+        "auto_import_build": True,
         "auth_dir": "",
         "copy_to_hotload": False,
         "hotload_dir": "",
@@ -248,6 +249,7 @@ class RegistrationManager:
             raise ValueError("验证码等待时间应在 30 到 600 秒之间")
         cpa = incoming.setdefault("cpa", {})
         cpa["enabled"] = bool(cpa.get("enabled", False))
+        cpa["auto_import_build"] = bool(cpa.get("auto_import_build", True))
         cpa["copy_to_hotload"] = bool(cpa.get("copy_to_hotload", False))
         cpa["prefer_protocol"] = bool(cpa.get("prefer_protocol", True))
         cpa["protocol_only"] = bool(cpa.get("protocol_only", False))

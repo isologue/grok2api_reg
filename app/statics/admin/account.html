@@ -986,6 +986,7 @@
         <tr>
           <th style="width:36px"><input type="checkbox" class="cb" id="cb-all" onchange="toggleAll(this.checked)"></th>
           <th style="width:200px" data-i18n="account.colToken">Token</th>
+          <th style="min-width:180px">邮箱 / 用户 ID</th>
           <th class="table-center" style="width:70px" data-i18n="account.colType">类型</th>
           <th class="table-center" style="width:70px" data-i18n="account.colStatus">状态</th>
           <th data-quota-only>
@@ -1009,9 +1010,46 @@
     </table>
   </div>
 
+  <section id="build-accounts" style="scroll-margin-top:84px">
+    <div class="section-head" style="margin-top:40px">
+      <div class="section-title-row"><div class="section-title">Grok Build 账号池</div><span class="section-count-badge" id="build-account-count">0</span></div>
+      <div class="page-actions">
+        <label class="page-action-btn" style="cursor:pointer"><input id="build-import-file" type="file" accept=".json,.zip" hidden><span>导入 CPA Auth</span></label>
+        <button type="button" class="page-action-btn" onclick="loadBuildAccounts()">刷新</button>
+      </div>
+    </div>
+    <p class="page-sub" style="margin:0 0 12px">导入 CPA Auth JSON 或 ZIP 后，账号与普通账号池隔离。模型路由请在顶部「模型路由」页面管理。</p>
+    <div class="table-wrap"><table><thead><tr><th>邮箱 / 用户 ID</th><th>状态</th><th>成功调用</th><th>失败调用</th><th>已同步模型</th><th>Token 过期</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="build-account-tbody"><tr><td colspan="8" class="empty-row">正在加载 Grok Build 账号池</td></tr></tbody></table></div>
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px;flex-wrap:wrap">
+      <button type="button" class="pagi-btn" id="build-account-prev" onclick="changeBuildAccountPage(-1)">上一页</button>
+      <span id="build-account-page-info" style="font-size:12px;color:var(--fg-muted)"></span>
+      <button type="button" class="pagi-btn" id="build-account-next" onclick="changeBuildAccountPage(1)">下一页</button>
+      <select class="input" id="build-account-page-size" style="width:auto;min-width:82px"><option value="10">10 / 页</option><option value="20">20 / 页</option><option value="50">50 / 页</option><option value="100">100 / 页</option><option value="200">200 / 页</option><option value="500">500 / 页</option><option value="1000">1000 / 页</option><option value="2000">2000 / 页</option></select>
+    </div>
+  </section>
+
+  <section id="cpa-export-tasks" style="scroll-margin-top:84px">
+    <div class="section-head" style="margin-top:40px">
+      <div class="section-title-row"><div class="section-title">CPA Auth 导出记录</div><span class="section-count-badge" id="cpa-task-count">0</span></div>
+      <div class="page-actions"><button type="button" class="page-action-btn" onclick="loadCpaTasks()">刷新</button></div>
+    </div>
+    <p class="page-sub" style="margin:0 0 12px">注册机自动导出和账号行内“重试 CPA 导出”任务都会在此保留结果，可点击查看日志。</p>
+    <div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>开始时间</th><th>结果</th><th>操作</th></tr></thead><tbody id="cpa-task-tbody"><tr><td colspan="5" class="empty-row">正在加载 CPA 导出记录</td></tr></tbody></table></div>
+  </section>
+
+
 </main>
 
 <!-- ── Add Modal ───────────────────────────────────────────────────────────── -->
+
+<div class="modal-overlay" id="modal-cpa-task-log">
+  <div class="modal" style="max-width:880px">
+    <div class="modal-title" id="cpa-task-log-title">CPA 导出任务日志</div>
+    <div class="dialog-body"><pre id="cpa-task-log-content" style="margin:0;max-height:56vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#171717;color:#eee;border-radius:8px;padding:12px;font-size:12px;line-height:1.55"></pre></div>
+    <div class="dialog-actions"><button type="button" class="dialog-btn" onclick="closeModal('modal-cpa-task-log')">关闭</button></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modal-import">
   <div class="modal">
     <div class="modal-title" data-i18n="account.addTitle">添加账户</div>
@@ -1129,6 +1167,7 @@ const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000];
 let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curPage = 1, pageSize = loadSavedPageSize();
 const sel = new Set();
 const refreshingTokens = new Set();
+const cpaRetryingTokens = new Set();
 let _cb = null;
 let _editingToken = '';
 let _filterMenuBound = false;
@@ -1185,6 +1224,124 @@ function waitI18n() {
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
+
+// Grok Build CPA Auth account pool shares the account-management page.
+let cpaTasks = [];
+let buildAccounts = [];
+let buildAccountPage = 1;
+const BUILD_ACCOUNT_PAGE_SIZE_KEY = 'admin.build_accounts.page_size';
+const BUILD_ACCOUNT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000, 2000];
+let buildAccountPageSize = Number(localStorage.getItem(BUILD_ACCOUNT_PAGE_SIZE_KEY)) || 50;
+const BUILD_TEXT = {"enabled": "\u5df2\u542f\u7528", "disabled": "\u5df2\u7981\u7528", "not_synced": "\u672a\u540c\u6b65", "sync": "\u540c\u6b65", "disable": "\u7981\u7528", "enable": "\u542f\u7528", "delete": "\u5220\u9664", "empty_accounts": "\u6682\u65e0 Grok Build \u8d26\u53f7", "load_failed": "Build \u8d26\u53f7\u6c60\u52a0\u8f7d\u5931\u8d25\uff1a", "sync_ok": "Build \u6a21\u578b\u540c\u6b65\u5b8c\u6210", "sync_failed": "\u540c\u6b65\u5931\u8d25\uff1a", "toggle_failed": "\u66f4\u65b0\u8d26\u53f7\u72b6\u6001\u5931\u8d25\uff1a", "confirm_delete_account": "\u786e\u5b9a\u5220\u9664\u6b64 Grok Build \u8d26\u53f7\u5417\uff1f", "delete_failed": "\u5220\u9664\u5931\u8d25\uff1a", "import_ok": "CPA Auth \u5bfc\u5165\u5b8c\u6210\uff1a\u65b0\u589e", "updated": "\u66f4\u65b0", "skipped": "\u8df3\u8fc7", "import_failed": "CPA Auth \u5bfc\u5165\u5931\u8d25\uff1a", "page": "\u7b2c", "page_of": "/", "page_suffix": "\u9875"};
+const _html = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const _buildDate = value => value ? new Date(value).toLocaleString() : '-';
+
+function renderBuildAccounts() {
+  const body = document.getElementById('build-account-tbody');
+  const count = document.getElementById('build-account-count');
+  const info = document.getElementById('build-account-page-info');
+  const prev = document.getElementById('build-account-prev');
+  const next = document.getElementById('build-account-next');
+  if (!body || !count) return;
+  const total = buildAccounts.length;
+  const totalPages = Math.max(1, Math.ceil(total / buildAccountPageSize));
+  buildAccountPage = Math.min(Math.max(1, buildAccountPage), totalPages);
+  const start = (buildAccountPage - 1) * buildAccountPageSize;
+  const items = buildAccounts.slice(start, start + buildAccountPageSize);
+  count.textContent = String(total);
+  if (info) info.textContent = `${BUILD_TEXT.page} ${buildAccountPage} ${BUILD_TEXT.page_of} ${totalPages} ${BUILD_TEXT.page_suffix}`;
+  if (prev) prev.disabled = buildAccountPage <= 1;
+  if (next) next.disabled = buildAccountPage >= totalPages;
+  body.innerHTML = items.length ? items.map(item => `
+    <tr>
+      <td>${_html(item.email || item.user_id || item.id)}</td>
+      <td>${item.enabled ? BUILD_TEXT.enabled : BUILD_TEXT.disabled}</td>
+      <td class="table-center" style="font-variant-numeric:tabular-nums;color:#198754">${Number(item.success_count || 0)}</td>
+      <td class="table-center" style="font-variant-numeric:tabular-nums;color:#b42318">${Number(item.failure_count || 0)}</td>
+      <td>${_html((item.models || []).join(', ') || BUILD_TEXT.not_synced)}</td>
+      <td>${_html(_buildDate(item.expires_at))}</td>
+      <td>${_html(item.last_error || '-')}</td>
+      <td><button class="pagi-btn" onclick="syncBuildAccount('${_html(item.id)}')">${BUILD_TEXT.sync}</button> <button class="pagi-btn" onclick="toggleBuildAccount('${_html(item.id)}', ${!item.enabled})">${item.enabled ? BUILD_TEXT.disable : BUILD_TEXT.enable}</button> <button class="pagi-btn" onclick="deleteBuildAccount('${_html(item.id)}')">${BUILD_TEXT.delete}</button></td>
+    </tr>`).join('') : `<tr><td colspan="8" class="empty-row">${BUILD_TEXT.empty_accounts}</td></tr>`;
+}
+function changeBuildAccountPage(delta) { buildAccountPage += Number(delta) || 0; renderBuildAccounts(); }
+function setBuildAccountPageSize(value) { const size = Number(value); buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(size) ? size : 50; localStorage.setItem(BUILD_ACCOUNT_PAGE_SIZE_KEY, String(buildAccountPageSize)); buildAccountPage = 1; renderBuildAccounts(); }
+function cpaTaskStateLabel(state) {
+  return ({ queued:'队列中', running:'运行中', completed:'已完成', failed:'失败', legacy:'旧数据' })[state] || state || '-';
+}
+function renderCpaTasks() {
+  const body = document.getElementById('cpa-task-tbody');
+  const count = document.getElementById('cpa-task-count');
+  if (!body || !count) return;
+  count.textContent = String(cpaTasks.length);
+  body.innerHTML = cpaTasks.length ? cpaTasks.map(item => {
+    const exported = Number(item.exported_count || 0);
+    const failed = Number(item.failed_count || 0);
+    const auths = Number(item.auth_count || 0);
+    const result = `导出 ${exported} / 失败 ${failed} / JSON ${auths}`;
+    const taskId = _html(item.task_id || '');
+    return `<tr><td><code>${taskId}</code></td><td>${_html(cpaTaskStateLabel(item.state))}</td><td>${_html(_buildDate(item.started_at))}</td><td>${result}</td><td><button type="button" class="pagi-btn" onclick="openCpaTaskLog('${taskId}')">查看日志</button></td></tr>`;
+  }).join('') : `<tr><td colspan="5" class="empty-row">暂无 CPA 导出记录</td></tr>`;
+}
+async function loadCpaTasks() {
+  const body = document.getElementById('cpa-task-tbody');
+  try {
+    const data = await _api('GET', '/registration/cpa-auths/tasks');
+    cpaTasks = (Array.isArray(data.items) ? data.items : []).sort((left, right) => {
+      const leftAt = Number(left?.sort_at || Date.parse(left?.started_at || '') || 0);
+      const rightAt = Number(right?.sort_at || Date.parse(right?.started_at || '') || 0);
+      return rightAt - leftAt || String(right?.task_id || '').localeCompare(String(left?.task_id || ''));
+    });
+    renderCpaTasks();
+  } catch (error) {
+    if (body) body.innerHTML = `<tr><td colspan="5" class="empty-row" style="color:#b42318">CPA 导出记录加载失败：${_html(error.message)}</td></tr>`;
+  }
+}
+async function openCpaTaskLog(taskId) {
+  const title = document.getElementById('cpa-task-log-title');
+  const content = document.getElementById('cpa-task-log-content');
+  if (title) title.textContent = `CPA 导出任务日志 - ${taskId}`;
+  if (content) content.textContent = '暂无可查看的任务日志';
+  openModal('modal-cpa-task-log');
+  try {
+    const data = await _api('GET', `/registration/cpa-auths/tasks/${encodeURIComponent(taskId)}/logs`);
+    if (content) content.textContent = Array.isArray(data.lines) && data.lines.length ? data.lines.join('\n') : '暂无可查看的任务日志';
+  } catch (error) {
+    if (content) content.textContent = `加载任务日志失败：${error.message}`;
+  }
+}
+
+async function loadBuildAccounts() {
+  const body = document.getElementById('build-account-tbody');
+  try {
+    const accounts = await _api('GET', '/build/accounts');
+    buildAccounts = Array.isArray(accounts.items) ? accounts.items : [];
+    renderBuildAccounts();
+  } catch (error) {
+    if (body) body.innerHTML = `<tr><td colspan="6" class="empty-row" style="color:#b42318">${BUILD_TEXT.load_failed}${_html(error.message)}</td></tr>`;
+    showToast(`${BUILD_TEXT.load_failed}${error.message}`, 'error');
+  }
+}
+async function syncBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/sync`); showToast(BUILD_TEXT.sync_ok, 'success'); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.sync_failed}${error.message}`, 'error'); } }
+async function toggleBuildAccount(id, enabled) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/toggle`, { enabled }); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.toggle_failed}${error.message}`, 'error'); } }
+async function deleteBuildAccount(id) { if (!confirm(BUILD_TEXT.confirm_delete_account)) return; try { await _api('DELETE', '/build/accounts', { ids: [id] }); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.delete_failed}${error.message}`, 'error'); } }
+async function importBuildCpa(file) {
+  if (!file) return;
+  try {
+    const key = await adminKey.get();
+    const form = new FormData();
+    form.append('file', file);
+    const response = await fetch(`${ADMIN_API}/build/import`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form });
+    if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || `HTTP ${response.status}`); }
+    const result = await response.json();
+    showToast(`${BUILD_TEXT.import_ok} ${result.added || 0} / ${BUILD_TEXT.updated} ${result.updated || 0} / ${BUILD_TEXT.skipped} ${result.skipped || 0}`, 'success');
+    await loadBuildAccounts();
+  } catch (error) { showToast(`${BUILD_TEXT.import_failed}${error.message}`, 'error'); }
+}
+document.getElementById('build-import-file')?.addEventListener('change', event => { importBuildCpa(event.target.files?.[0]); event.target.value = ''; });
+const buildPageSizeSelect = document.getElementById('build-account-page-size');
+if (buildPageSizeSelect) { buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(buildAccountPageSize) ? buildAccountPageSize : 50; buildPageSizeSelect.value = String(buildAccountPageSize); buildPageSizeSelect.addEventListener('change', event => setBuildAccountPageSize(event.target.value)); }
+
 (async () => {
   await waitI18n();
   applyAccountI18n();
@@ -1194,7 +1351,13 @@ function waitI18n() {
   const key = await adminKey.get();
   if (!key || !await verifyKey(ADMIN_API + '/verify', key).catch(() => false))
     return location.href = '/admin/login';
-  load();
+  await Promise.all([load(), loadBuildAccounts(), loadCpaTasks()]);
+  // CPA auto-export runs in the registration worker process. Refresh only the
+  // related sections so a completed import is visible without restarting/F5.
+  window.setInterval(() => {
+    loadBuildAccounts().catch(() => {});
+    loadCpaTasks().catch(() => {});
+  }, 12_000);
 })();
 
 // ── API ────────────────────────────────────────────────────────────────────
@@ -1492,7 +1655,7 @@ function renderTable(view = getTokenView()) {
 
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(rowHtml).join('')
-    : `<tr><td colspan="10" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
+    : `<tr><td colspan="11" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
   $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
   $('section-table-count', total);
@@ -1507,6 +1670,8 @@ function rowHtml(t) {
   const isDisabled = t.status === 'disabled';
   const canManageNsfw = isManageableStatus(t.status);
   const isRefreshing = refreshingTokens.has(t.token);
+  const hasRegistrationArchive = Boolean(t.has_registration_archive);
+  const isCpaRetrying = cpaRetryingTokens.has(t.token);
   const success = t.use_count || 0;
   const fail = t.fail_count || 0;
   const nsfwBtn = isNsfw
@@ -1531,7 +1696,11 @@ function rowHtml(t) {
           <svg viewBox="0 0 24 24" stroke-width="1.8"><rect x="9" y="9" width="10" height="10" rx="2"/><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"/></svg>
         </button>
       </div></td>
-    <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
+    <td style="font-size:12px;line-height:1.45">
+        <div>${xe(t.email || '-')}</div>
+        ${t.user_id ? `<div style="color:#9a9a9a;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">${xe(t.user_id)}</div>` : ''}
+      </td>
+      <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
     <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#8f8f8f">${success}</td>
@@ -1548,6 +1717,9 @@ function rowHtml(t) {
       <button onclick="refreshOne('${xe(t.token)}')" class="row-icon-btn${isRefreshing ? ' is-loading' : ''}" data-tip="${xe(isRefreshing ? tr('account.refreshing', { n: 1 }, '正在刷新 1 个账户…') : tr('account.actionRefresh', null, '刷新 Usage'))}" aria-label="${xe(tr('account.actionRefresh', null, '刷新 Usage'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
       </button>
+      ${hasRegistrationArchive ? `<button onclick="retryCpaExport('${xe(t.token)}')" class="row-icon-btn${isCpaRetrying ? ' is-loading' : ''}" data-tip="${xe(isCpaRetrying ? tr('account.retryCpaInProgress', null, '正在重试 CPA 导出…') : tr('account.actionRetryCpa', null, '重试 CPA 导出'))}" aria-label="${xe(tr('account.actionRetryCpa', null, '重试 CPA 导出'))}">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 1 0-2.35 5.3"/><path d="M20 4v7h-7"/><path d="m12 8 3 3-3 3"/><path d="M9 11h6"/></svg>
+      </button>` : ''}
       <button onclick="openEdit('${xe(t.token)}')" class="row-icon-btn" data-tip="${xe(tr('account.actionEdit', null, '编辑'))}" aria-label="${xe(tr('account.actionEdit', null, '编辑'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="m4 20 4.5-1 9.5-9.5-3.5-3.5L5 15.5z"/><path d="m13.5 5.5 3.5 3.5"/></svg>
       </button>
@@ -1996,6 +2168,49 @@ async function cancelBatch() {
 }
 
 // ── Refresh ────────────────────────────────────────────────────────────────
+// Manual CPA Auth export retry for an account with an encrypted registration archive.
+const cpaRetrySleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function retryCpaExport(token) {
+  if (cpaRetryingTokens.has(token)) return;
+  openConfirm('重试 CPA 导出', `将使用此账号已保存的注册档案重试导出 CPA Auth，导出成功后会自动导入 Build 账号池。`, async () => {
+    cpaRetryingTokens.add(token);
+    renderTable();
+    try {
+      const task = await _api('POST', '/registration/cpa-auths/retry', { token });
+      await loadCpaTasks();
+      showToast('已启动 CPA 导出重试，正在后台处理…', 'info');
+      await watchCpaRetry(task.task_id);
+    } catch (e) {
+      showToast(`启动 CPA 重试导出失败: ${e.message}`, 'error');
+    } finally {
+      cpaRetryingTokens.delete(token);
+      renderTable();
+    }
+  });
+}
+
+async function watchCpaRetry(taskId) {
+  for (let attempt = 0; attempt < 140; attempt++) {
+    await cpaRetrySleep(3000);
+    if (attempt % 2 === 0) await loadCpaTasks().catch(() => {});
+    const task = await _api('GET', `/registration/cpa-auths/retry/${encodeURIComponent(taskId)}`);
+    if (task.state === 'completed') {
+      showToast(task.message || 'CPA Auth 重试导出完成', 'success');
+      await load();
+      await loadBuildAccounts();
+      await loadCpaTasks();
+      return;
+    }
+    if (task.state === 'failed') {
+      showToast(`CPA Auth 重试导出失败: ${task.message || 'unknown error'}`, 'error');
+      await loadCpaTasks();
+      return;
+    }
+  }
+  showToast('已启动 CPA 导出重试，正在后台处理…', 'info');
+}
+
 async function refreshOne(token) {
   if (refreshingTokens.has(token)) return;
   refreshingTokens.add(token);

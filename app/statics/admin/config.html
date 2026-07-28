@@ -444,6 +444,13 @@ const SCHEMA_DEF = [
             max: 1000000,
             desc: '每条上游请求或响应记录的最大保存长度，默认 16000。超出部分会被截断。',
           },
+          {
+            key: 'enabled',
+            section: 'logging.audit',
+            label: '\u542f\u7528\u8bf7\u6c42\u5ba1\u8ba1',
+            type: 'bool',
+            desc: '\u6301\u4e45\u4fdd\u5b58\u8131\u654f\u540e\u7684\u8d26\u53f7\u6807\u8bc6\u3001\u8bf7\u6c42\u53c2\u6570\u3001\u4e0a\u6e38\u8fd4\u56de\u3001\u8017\u65f6\u4e0e\u9519\u8bef\u4fe1\u606f\uff0c\u53ef\u4ece\u300c\u8bf7\u6c42\u5ba1\u8ba1\u300d\u9875\u9762\u67e5\u770b\u3002',
+          },
         ]
       },
     ]

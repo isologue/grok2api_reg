@@ -10,7 +10,7 @@ window.renderAdminHeader = async function renderAdminHeader() {
       return 'v1';
     }
   })();
-  const HEADER_HTML_CACHE_REVISION = '2';
+  const HEADER_HTML_CACHE_REVISION = '11';
   const HEADER_HTML_CACHE_KEY = `grok2api.admin_header_html.${HEADER_HTML_CACHE_REVISION}.${scriptVersion}`;
   const META_VERSION_CACHE_KEY = `grok2api.meta_version.${scriptVersion}`;
   let appVersion = '';
@@ -565,6 +565,9 @@ window.renderAdminHeader = async function renderAdminHeader() {
             <a href="/admin/config" class="admin-nav-link" data-nav="/admin/config" data-i18n="header.config">配置管理</a>
             <a href="/admin/cache" class="admin-nav-link" data-nav="/admin/cache" data-i18n="header.cache">缓存管理</a>
             <a href="/admin/logs" class="admin-nav-link" data-nav="/admin/logs">日志查看</a>
+<a href="/admin/audits" class="admin-nav-link" data-nav="/admin/audits">请求审计</a>
+<a href="/admin/model-routes" class="admin-nav-link" data-nav="/admin/model-routes">模型路由</a>
+            <a href="/admin/register" class="admin-nav-link" data-nav="/admin/register">Register</a>
           </nav>
           <div class="admin-header-right">
             <div class="admin-lang-menu" id="hd-lang-menu">

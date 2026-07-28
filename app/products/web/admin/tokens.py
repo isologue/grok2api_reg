@@ -28,6 +28,7 @@ from app.control.account.commands import (
 )
 from app.control.account.enums import AccountStatus
 from app.control.account.state_machine import is_manageable
+from app.control.registration.archive import ARCHIVE_EXT_KEY, decrypt_profile
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -121,9 +122,31 @@ def _quota_brief(q: dict) -> dict:
     return out
 
 
+def _registration_identity(ext: dict | None) -> tuple[str, str]:
+    """Return admin-display identity only; never expose archive credentials/OAuth."""
+    try:
+        profile = decrypt_profile(ext or {})
+    except Exception:  # A bad archive must not break the whole account list.
+        return "", ""
+    if not profile:
+        return "", ""
+    oauth = profile.get("oauth") if isinstance(profile.get("oauth"), dict) else {}
+    email = str(profile.get("email") or oauth.get("email") or "").strip()
+    user_id = str(
+        profile.get("user_id")
+        or oauth.get("user_id")
+        or oauth.get("principal_id")
+        or ""
+    ).strip()
+    return email, user_id
+
+
 def _serialize_record(r) -> dict:
+    email, user_id = _registration_identity(r.ext if isinstance(r.ext, dict) else {})
     return {
         "token":       r.token,
+        "email":       email,
+        "user_id":     user_id,
         "pool":        r.pool or "basic",
         "status":      r.status,
         "quota":       _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
@@ -131,6 +154,7 @@ def _serialize_record(r) -> dict:
         "fail_count":  r.usage_fail_count or 0,
         "last_used_at": r.last_use_at,
         "tags":        r.tags or [],
+        "has_registration_archive": bool((r.ext or {}).get(ARCHIVE_EXT_KEY)),
     }
 
 

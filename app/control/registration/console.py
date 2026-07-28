@@ -72,6 +72,11 @@ def _translate_run(message: str) -> str:
     return message
 
 
+def translate_cpa_message(message: str) -> str:
+    """Return a compact Chinese CPA message for admin-visible task logs."""
+    return _translate_cpa(str(message or ""))
+
+
 def _translate_cpa(message: str) -> str:
     if message.startswith("[cpa] "):
         message = message[6:]

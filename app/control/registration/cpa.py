@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable
 
 from app.platform.paths import data_path
@@ -151,12 +152,25 @@ def finalize_cpa_task(cpa: dict[str, Any], task_id: str, *, state: str, finished
     _write_manifest(path, manifest)
 
 
+def _task_time_ms(value: Any, *, fallback_ms: int = 0) -> int:
+    """Normalize ISO task timestamps before sorting mixed UTC/local task records."""
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return int(parsed.timestamp() * 1000)
+        except ValueError:
+            pass
+    return max(0, int(fallback_ms))
+
+
 def list_cpa_auth_tasks(cpa: dict[str, Any]) -> list[dict[str, Any]]:
-    """List task-isolated CPA outputs. Legacy flat files remain exportable as one group."""
+    """List task-isolated CPA outputs in true newest-first chronological order."""
     root = cpa_auth_root(cpa)
     rows: list[dict[str, Any]] = []
     legacy_files = sorted(path for path in root.glob("*.json") if path.is_file())
     if legacy_files:
+        latest_mtime_ms = max(int(path.stat().st_mtime * 1000) for path in legacy_files)
         rows.append({
             "task_id": "legacy",
             "state": "legacy",
@@ -166,6 +180,7 @@ def list_cpa_auth_tasks(cpa: dict[str, Any]) -> list[dict[str, Any]]:
             "exported_count": len(legacy_files),
             "failed_count": 0,
             "auth_count": len(legacy_files),
+            "sort_at": latest_mtime_ms,
         })
     for directory in root.iterdir():
         if not directory.is_dir():
@@ -176,17 +191,21 @@ def list_cpa_auth_tasks(cpa: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         manifest = _read_manifest(_manifest_path(cpa, task_id))
         files = sorted(path for path in directory.glob("*.json") if path.is_file())
+        started_at = str(manifest.get("started_at") or "")
+        # A few legacy tasks predate manifests; use directory mtime only as a fallback.
+        sort_at = _task_time_ms(started_at, fallback_ms=int(directory.stat().st_mtime * 1000))
         rows.append({
             "task_id": task_id,
             "state": str(manifest.get("state") or "completed"),
-            "started_at": str(manifest.get("started_at") or ""),
+            "started_at": started_at,
             "finished_at": str(manifest.get("finished_at") or ""),
             "requested_count": int(manifest.get("requested_count") or 0),
             "exported_count": int(manifest.get("exported_count") or len(files)),
             "failed_count": int(manifest.get("failed_count") or 0),
             "auth_count": len(files),
+            "sort_at": sort_at,
         })
-    return sorted(rows, key=lambda item: (item["started_at"], item["task_id"]), reverse=True)
+    return sorted(rows, key=lambda item: (int(item.get("sort_at") or 0), item["task_id"]), reverse=True)
 
 
 def cpa_auth_task_files(cpa: dict[str, Any], task_id: str) -> list[Path]:

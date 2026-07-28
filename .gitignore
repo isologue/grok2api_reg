@@ -46,6 +46,10 @@ logs/
 data/
 app/data/
 
+# Source module (the generic build/ rule above must not hide this package)
+!app/control/build/
+!app/control/build/**
+
 # Testing
 .pytest_cache/
 .coverage

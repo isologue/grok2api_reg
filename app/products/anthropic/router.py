@@ -103,18 +103,25 @@ async def messages_endpoint(req: MessagesRequest):
     # Convert Pydantic models → plain dicts
     messages = [m.model_dump() for m in req.messages]
 
-    from .messages import create as messages_create
-    result = await messages_create(
-        model        = req.model,
-        messages     = messages,
-        system       = req.system,
-        stream       = is_stream,
-        emit_think   = emit_think,
-        temperature  = req.temperature or 0.8,
-        top_p        = req.top_p or 0.95,
-        tools        = req.tools or None,
-        tool_choice  = req.tool_choice,
-    )
+    if spec.is_build_chat():
+        from app.products.build.messages import create as build_messages_create
+        result = await build_messages_create(
+            model=req.model, messages=messages, system=req.system, stream=is_stream,
+            temperature=req.temperature or 0.8, top_p=req.top_p or 0.95, max_tokens=req.max_tokens,
+        )
+    else:
+        from .messages import create as messages_create
+        result = await messages_create(
+            model        = req.model,
+            messages     = messages,
+            system       = req.system,
+            stream       = is_stream,
+            emit_think   = emit_think,
+            temperature  = req.temperature or 0.8,
+            top_p        = req.top_p or 0.95,
+            tools        = req.tools or None,
+            tool_choice  = req.tool_choice,
+        )
 
     if isinstance(result, dict):
         return JSONResponse(result)

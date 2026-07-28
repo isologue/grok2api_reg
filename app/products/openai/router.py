@@ -49,6 +49,12 @@ async def _available_pools(request: Request) -> frozenset[str]:
 def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
     if not spec.enabled:
         return False
+    if spec.is_build_chat():
+        # Build accounts are OAuth CPA Auth credentials, not grok.com SSO rows.
+        # Public aliases may resolve to a different upstream model.
+        from app.control.build import store as build_store
+        from app.control.build.routes import store as build_routes
+        return build_store.has_model(build_routes.upstream_for(spec.model_name) or spec.model_name)
     for pool_id in spec.pool_candidates():
         pool = _POOL_ID_TO_NAME[pool_id]
         if pool in pools and supports_mode(pool, int(spec.mode_id)):
@@ -294,6 +300,14 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 preset=vcfg.preset,
             )
 
+        elif spec.is_build_chat():
+            from app.products.build.chat import completions as build_completions
+            result = await build_completions(
+                model=req.model, messages=messages, stream=is_stream,
+                temperature=req.temperature or 0.8, top_p=req.top_p or 0.95,
+                tools=req.tools, tool_choice=req.tool_choice, max_tokens=req.max_tokens,
+            )
+
         else:
             # reasoning_effort=None → config default; "none" → off; otherwise → on.
             if req.reasoning_effort is None:
@@ -392,6 +406,15 @@ async def responses_endpoint(req: ResponsesCreateRequest):
     is_stream = (
         req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
     )
+
+    if spec.is_build_chat():
+        from app.products.build.service import create as build_create, stream as build_stream
+        payload = req.model_dump(exclude_none=True)
+        payload["stream"] = is_stream
+        result = build_stream(model=req.model, payload=payload) if is_stream else await build_create(model=req.model, payload=payload)
+        if isinstance(result, dict):
+            return JSONResponse(result)
+        return StreamingResponse(_safe_sse_responses(result), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     # Map reasoning param → emit_think flag.
     # reasoning=None → use config; reasoning.effort="none" → off; otherwise on.

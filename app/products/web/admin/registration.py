@@ -1,10 +1,15 @@
 """Admin endpoints for the integrated browser registration worker."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import io
 import os
+import re
 import zipfile
+from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
@@ -12,9 +17,18 @@ from pydantic import BaseModel, Field, RootModel
 
 from app.control.account.commands import AccountUpsert
 from app.control.account.repository import AccountRepository
-from app.control.registration.archive import ARCHIVE_EXT_KEY, encrypt_profile
-from app.control.registration.cpa import cpa_auth_task_files, list_cpa_auth_tasks
+from app.control.registration.archive import ARCHIVE_EXT_KEY, decrypt_profile, encrypt_profile
+from app.control.registration.cpa import (
+    cpa_auth_task_files,
+    export_cpa_auth,
+    finalize_cpa_task,
+    initialize_cpa_task,
+    list_cpa_auth_tasks,
+    record_cpa_task_result,
+)
+from app.control.registration.console import translate_cpa_message
 from app.platform.auth.middleware import get_admin_key
+from app.platform.paths import log_path
 from . import get_repo
 
 router = APIRouter(prefix="/registration", tags=["Admin - Registration"])
@@ -30,6 +44,78 @@ class RegistrationArchiveItem(BaseModel):
     password: str = ""
     oauth: dict[str, Any] = Field(default_factory=dict)
     provider: str = "grok_build"
+
+
+class CpaRetryRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=8_192)
+
+
+def _cpa_retry_runtime(request: Request) -> tuple[dict[str, dict[str, Any]], set[str], asyncio.Lock]:
+    """Keep manual CPA retries isolated from the browser-registration process."""
+    app_state = request.app.state
+    tasks = getattr(app_state, "manual_cpa_retry_tasks", None)
+    if tasks is None:
+        tasks = {}
+        app_state.manual_cpa_retry_tasks = tasks
+    active_tokens = getattr(app_state, "manual_cpa_retry_active_tokens", None)
+    if active_tokens is None:
+        active_tokens = set()
+        app_state.manual_cpa_retry_active_tokens = active_tokens
+    lock = getattr(app_state, "manual_cpa_retry_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app_state.manual_cpa_retry_lock = lock
+    return tasks, active_tokens, lock
+
+
+def _manual_cpa_task_id() -> str:
+    return "manual_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6]
+
+
+def _retry_state_payload(task: dict[str, Any]) -> dict[str, Any]:
+    """Return task progress without exposing archive, SSO, or OAuth material."""
+    return {
+        key: task.get(key)
+        for key in (
+            "task_id", "state", "created_at", "started_at", "finished_at", "email",
+            "message", "build_imported", "models",
+        )
+    }
+
+
+def _cpa_task_log_path(task_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", task_id):
+        raise ValueError("invalid CPA task id")
+    directory = log_path("registration")
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{task_id}.log"
+
+
+def _append_cpa_task_log(task_id: str, message: str) -> None:
+    """Append one UTF-8, Chinese-formatted line without retaining credentials."""
+    try:
+        path = _cpa_task_log_path(task_id)
+        text = translate_cpa_message(message)
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} | [CPA] {text}\n")
+    except OSError:
+        # A failed observability write must never abort a valid OAuth export.
+        return
+
+
+def _read_cpa_task_log(task_id: str, *, limit: int = 300) -> list[str]:
+    try:
+        path = _cpa_task_log_path(task_id)
+    except ValueError:
+        return []
+    if not path.is_file():
+        return []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read().splitlines()[-max(1, min(int(limit), 1_000)):]
+    except OSError:
+        return []
 
 
 def _manager(request: Request):
@@ -126,6 +212,136 @@ async def import_registration_archives(
         raise HTTPException(400, "No valid registration archives provided")
     result = await repo.upsert_accounts(upserts)
     return {"count": result.upserted or len(upserts), "skipped": 0}
+
+
+@router.post("/cpa-auths/retry")
+async def retry_cpa_auth_for_account(
+    req: CpaRetryRequest,
+    request: Request,
+    repo: AccountRepository = Depends(get_repo),
+):
+    """Retry CPA Auth export from an encrypted registration archive.
+
+    The normal account token is the saved SSO cookie.  The encrypted archive
+    contains the registration email/password for browser fallback if protocol
+    mint cannot finish.  Neither value is returned to the caller.
+    """
+    token = req.token.strip()
+    record = next(iter(await repo.get_accounts([token])), None)
+    if record is None:
+        raise HTTPException(404, "账号不存在或已删除")
+
+    profile = decrypt_profile(record.ext)
+    if profile is None:
+        raise HTTPException(409, "该账号没有可用的注册档案，无法重试 CPA 导出")
+    email = str(profile.get("email") or "").strip()
+    password = str(profile.get("password") or "")
+    if not email or not password:
+        raise HTTPException(409, "注册档案缺少邮箱或密码，无法重试 CPA 导出")
+
+    tasks, active_tokens, retry_lock = _cpa_retry_runtime(request)
+    if token in active_tokens:
+        raise HTTPException(409, "该账号的 CPA 导出重试正在进行")
+
+    settings = _manager(request)._read_settings_raw()
+    cpa = dict(settings.get("cpa") or {})
+    # This is an explicit admin action, so it is allowed even when automatic
+    # post-registration export is currently disabled.
+    cpa["enabled"] = True
+    if not str(cpa.get("proxy") or "").strip():
+        cpa["proxy"] = str(settings.get("browser_proxy") or settings.get("proxy") or "").strip()
+    task_id = _manual_cpa_task_id()
+    cpa["task_id"] = task_id
+    initialize_cpa_task(cpa, task_id, started_at=datetime.now(UTC).isoformat(), requested_count=1)
+    _append_cpa_task_log(task_id, "manual CPA retry queued")
+
+    task: dict[str, Any] = {
+        "task_id": task_id,
+        "state": "queued",
+        "created_at": datetime.now(UTC).isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "email": email,
+        "message": "已加入 CPA 导出重试队列",
+        "build_imported": False,
+        "models": [],
+    }
+    tasks[task_id] = task
+    active_tokens.add(token)
+
+    async def _run() -> None:
+        task["state"] = "running"
+        task["started_at"] = datetime.now(UTC).isoformat()
+        task["message"] = "正在导出 CPA Auth"
+        _append_cpa_task_log(task_id, "manual CPA retry started")
+        try:
+            async with retry_lock:
+                result = await asyncio.to_thread(
+                    export_cpa_auth,
+                    account={"email": email, "password": password, "sso": record.token},
+                    cpa=cpa,
+                    cookies=None,
+                    log=lambda message: _append_cpa_task_log(task_id, message),
+                )
+            record_cpa_task_result(cpa, result)
+            if not result.get("ok"):
+                task["state"] = "failed"
+                task["message"] = str(result.get("error") or result.get("reason") or "CPA 导出失败")[:500]
+                _append_cpa_task_log(task_id, f"manual CPA retry failed: {task['message']}")
+                return
+
+            probe = result.get("probe_models") if isinstance(result.get("probe_models"), dict) else {}
+            model_ids = [str(item) for item in (probe.get("model_ids") or []) if str(item)]
+            task["models"] = model_ids
+            if bool(cpa.get("auto_import_build", True)) and "grok-4.5" in model_ids and result.get("path"):
+                try:
+                    from app.control.build import import_cpa_auth_file
+                    from app.control.build.routes import store as build_routes
+
+                    import_cpa_auth_file(str(result["path"]), model_ids=model_ids)
+                    build_routes.sync_discovered(model_ids)
+                    task["build_imported"] = True
+                except Exception as exc:  # noqa: BLE001
+                    task["message"] = f"CPA Auth 已导出，但自动导入 Build 账号池失败：{type(exc).__name__}: {exc}"[:500]
+                    task["state"] = "completed"
+                    _append_cpa_task_log(task_id, task["message"])
+                    return
+            task["state"] = "completed"
+            task["message"] = "CPA Auth 已导出并导入 Build 账号池" if task["build_imported"] else "CPA Auth 已导出"
+            _append_cpa_task_log(task_id, task["message"])
+        except Exception as exc:  # noqa: BLE001
+            record_cpa_task_result(cpa, {"ok": False, "error": f"retry exception: {type(exc).__name__}: {exc}"})
+            task["state"] = "failed"
+            task["message"] = f"CPA 导出异常：{type(exc).__name__}: {exc}"[:500]
+            _append_cpa_task_log(task_id, task["message"])
+        finally:
+            task["finished_at"] = datetime.now(UTC).isoformat()
+            finalize_cpa_task(cpa, task_id, state=task["state"], finished_at=task["finished_at"])
+            active_tokens.discard(token)
+
+    asyncio.create_task(_run(), name=f"manual-cpa-retry-{task_id}")
+    return _retry_state_payload(task)
+
+
+@router.get("/cpa-auths/retry/{task_id}")
+async def get_cpa_retry_status(task_id: str, request: Request):
+    tasks, _, _ = _cpa_retry_runtime(request)
+    task = tasks.get(task_id)
+    if task is None:
+        raise HTTPException(404, "未找到 CPA 导出重试任务")
+    return _retry_state_payload(task)
+
+
+@router.get("/cpa-auths/tasks/{task_id}/logs")
+async def get_cpa_auth_task_logs(task_id: str):
+    """Read the latest task log lines; the endpoint never exposes CPA JSON contents."""
+    try:
+        lines = _read_cpa_task_log(task_id)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid task_id") from exc
+    if not lines:
+        raise HTTPException(404, "暂无可查看的任务日志")
+    return {"task_id": task_id, "lines": lines}
 
 
 @router.get("/cpa-auths/tasks")

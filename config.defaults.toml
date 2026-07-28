@@ -25,6 +25,10 @@ enabled = true
 # 单条请求或响应日志最多保存字符数，超出部分会被截断。
 max_chars = 16000
 
+[logging.audit]
+# Persist redacted provider request audits for the admin audit page.
+enabled = true
+
 
 # ==================== 应用功能 ====================
 [features]
