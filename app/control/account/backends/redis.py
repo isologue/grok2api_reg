@@ -220,18 +220,32 @@ class RedisAccountRepository:
             except ValueError:
                 continue
             pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
-            qs   = default_quota_set(pool)
             ts   = now_ms()
-            record = AccountRecord(
-                token    = token,
-                pool     = pool,
-                tags     = item.tags,
-                ext      = item.ext,
-                quota    = qs.to_dict(),
-                created_at = ts,
-                updated_at = ts,
-            )
             key = _record_key(token)
+            existing_hash = await self._r.hgetall(key)
+            if existing_hash:
+                existing = self._from_hash(token, existing_hash)
+                merged_ext = dict(existing.ext)
+                merged_ext.update(item.ext or {})
+                record = existing.model_copy(update={
+                    "pool": pool,
+                    "status": AccountStatus.ACTIVE,
+                    "tags": item.tags,
+                    "ext": merged_ext,
+                    "updated_at": ts,
+                    "deleted_at": None,
+                })
+            else:
+                qs = default_quota_set(pool)
+                record = AccountRecord(
+                    token    = token,
+                    pool     = pool,
+                    tags     = item.tags,
+                    ext      = item.ext,
+                    quota    = qs.to_dict(),
+                    created_at = ts,
+                    updated_at = ts,
+                )
             await self._r.hset(key, mapping=self._to_hash(record, rev))
             await self._r.sadd(_pool_key(pool), token)
             await self._r.zadd(_KEY_REV_LOG, {token: rev})
@@ -358,6 +372,48 @@ class RedisAccountRepository:
             await self._r.zadd(_KEY_REV_LOG, {token: rev})
             count += 1
         return AccountMutationResult(deleted=count, revision=rev)
+
+    async def rotate_account_token(
+        self,
+        old_token: str,
+        new_token: str,
+    ) -> AccountMutationResult:
+        """Rotate an account token while preserving all fields and revision visibility."""
+        old_token = AccountRecord.model_validate({"token": old_token}).token
+        new_token = AccountRecord.model_validate({"token": new_token}).token
+        if old_token == new_token:
+            return AccountMutationResult()
+        old_key = _record_key(old_token)
+        new_key = _record_key(new_token)
+        old_hash = await self._r.hgetall(old_key)
+        if not old_hash:
+            return AccountMutationResult()
+        record = self._from_hash(old_token, old_hash)
+        if record.is_deleted():
+            return AccountMutationResult()
+        if await self._r.exists(new_key):
+            raise ValueError("new SSO token already belongs to an existing account")
+
+        rev = await self._bump_revision()
+        ts = now_ms()
+        replacement = record.model_copy(update={
+            "token": new_token,
+            "updated_at": ts,
+            "revision": rev,
+        })
+        async with self._r.pipeline(transaction=True) as pipe:
+            pipe.hset(new_key, mapping=self._to_hash(replacement, rev))
+            pipe.sadd(_pool_key(record.pool), new_token)
+            pipe.zadd(_KEY_REV_LOG, {new_token: rev})
+            pipe.hset(old_key, mapping={
+                "deleted_at": str(ts),
+                "updated_at": str(ts),
+                "revision": str(rev),
+            })
+            pipe.srem(_pool_key(record.pool), old_token)
+            pipe.zadd(_KEY_REV_LOG, {old_token: rev})
+            await pipe.execute()
+        return AccountMutationResult(upserted=1, deleted=1, revision=rev)
 
     async def get_accounts(
         self,

@@ -1183,6 +1183,38 @@ def approve_device_code(
     raise BrowserConfirmError(msg)
 
 
+def _snapshot_sso_cookie(page: Any) -> str:
+    """Return the current browser SSO value without logging or persisting the jar."""
+    for getter in (
+        lambda: page.cookies(all_domains=True, all_info=True),
+        lambda: page.cookies(all_domains=True),
+        lambda: page.cookies(),
+    ):
+        try:
+            cookies = getter()
+        except TypeError:
+            continue
+        except Exception:
+            continue
+        if not isinstance(cookies, list):
+            continue
+        fallback = ""
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            name = str(cookie.get("name") or cookie.get("Name") or "")
+            value = cookie.get("value") if "value" in cookie else cookie.get("Value")
+            if not value:
+                continue
+            if name == "sso":
+                return str(value).strip()
+            if name == "sso-rw" and not fallback:
+                fallback = str(value).strip()
+        if fallback:
+            return fallback
+    return ""
+
+
 def mint_with_browser(
     *,
     email: str,
@@ -1318,7 +1350,7 @@ def mint_with_browser(
         if "token" in token_box:
             tr = token_box["token"]
             success = True
-            return {
+            result = {
                 "access_token": tr.access_token,
                 "refresh_token": tr.refresh_token,
                 "id_token": tr.id_token,
@@ -1326,6 +1358,13 @@ def mint_with_browser(
                 "expires_in": tr.expires_in,
                 "user_code": sess.user_code,
             }
+            refreshed_sso = _snapshot_sso_cookie(work_page)
+            if refreshed_sso:
+                # This value is propagated only in memory to the admin retry
+                # worker, where it atomically replaces the old account token.
+                result["refreshed_sso"] = refreshed_sso
+                log("browser session SSO captured for account rotation")
+            return result
         if "err" in err_box:
             raise err_box["err"]
         raise OAuthDeviceError("token poll thread ended without result")

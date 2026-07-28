@@ -122,14 +122,14 @@ def _quota_brief(q: dict) -> dict:
     return out
 
 
-def _registration_identity(ext: dict | None) -> tuple[str, str]:
-    """Return admin-display identity only; never expose archive credentials/OAuth."""
+def _registration_identity(ext: dict | None) -> tuple[str, str, bool]:
+    """Return display identity and credential availability without exposing secrets."""
     try:
         profile = decrypt_profile(ext or {})
     except Exception:  # A bad archive must not break the whole account list.
-        return "", ""
+        return "", "", False
     if not profile:
-        return "", ""
+        return "", "", False
     oauth = profile.get("oauth") if isinstance(profile.get("oauth"), dict) else {}
     email = str(profile.get("email") or oauth.get("email") or "").strip()
     user_id = str(
@@ -138,15 +138,17 @@ def _registration_identity(ext: dict | None) -> tuple[str, str]:
         or oauth.get("principal_id")
         or ""
     ).strip()
-    return email, user_id
+    has_login_credentials = bool(email and str(profile.get("password") or ""))
+    return email, user_id, has_login_credentials
 
 
 def _serialize_record(r) -> dict:
-    email, user_id = _registration_identity(r.ext if isinstance(r.ext, dict) else {})
+    email, user_id, has_login_credentials = _registration_identity(r.ext if isinstance(r.ext, dict) else {})
     return {
         "token":       r.token,
         "email":       email,
         "user_id":     user_id,
+        "has_login_credentials": has_login_credentials,
         "pool":        r.pool or "basic",
         "status":      r.status,
         "quota":       _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
@@ -205,9 +207,34 @@ async def _list_all_records(repo: "AccountRepository") -> list:
 
 async def _list_token_payloads(repo: "AccountRepository") -> list[dict]:
     fast_list = getattr(repo, "list_token_payloads", None)
-    if callable(fast_list):
-        return await fast_list()
-    return [_serialize_record(r) for r in await _list_all_records(repo)]
+    if not callable(fast_list):
+        return [_serialize_record(r) for r in await _list_all_records(repo)]
+
+    payloads = await fast_list()
+    # Local SQLite fast-listing avoids loading encrypted ext data, but the
+    # account page also needs safe derived fields (email/user ID/capability).
+    # Rehydrate records server-side only; never put archive/password/SSO in
+    # the response.  Backends that already provide these fields skip the read.
+    if not payloads or all("has_login_credentials" in item for item in payloads):
+        return payloads
+    tokens = [str(item.get("token") or "") for item in payloads if item.get("token")]
+    records = await repo.get_accounts(tokens)
+    identities = {
+        record.token: _serialize_record(record)
+        for record in records
+        if not record.is_deleted()
+    }
+    for item in payloads:
+        identity = identities.get(str(item.get("token") or ""))
+        if identity is None:
+            item.setdefault("email", "")
+            item.setdefault("user_id", "")
+            item.setdefault("has_login_credentials", False)
+            continue
+        item["email"] = identity["email"]
+        item["user_id"] = identity["user_id"]
+        item["has_login_credentials"] = identity["has_login_credentials"]
+    return payloads
 
 
 async def _list_invalid_tokens(repo: "AccountRepository") -> list[str]:

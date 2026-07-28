@@ -83,12 +83,11 @@ def _read_locked(*, limit: int = _MAX_ITEMS) -> list[dict[str, Any]]:
     return rows[-limit:]
 
 
-def list_items(*, limit: int = 200, query: str = "", provider: str = "", status: str = "") -> list[dict[str, Any]]:
-    safe_limit = min(max(int(limit or 200), 1), 1_000)
+def _filtered_items(*, query: str = "", provider: str = "", status: str = "") -> list[dict[str, Any]]:
     needle = str(query or "").strip().lower()
     with _LOCK:
         rows = list(reversed(_read_locked()))
-    result = []
+    result: list[dict[str, Any]] = []
     for row in rows:
         if provider and row.get("provider") != provider:
             continue
@@ -109,9 +108,31 @@ def list_items(*, limit: int = 200, query: str = "", provider: str = "", status:
         if needle and needle not in " ".join(str(row.get(key) or "") for key in ("public_model", "upstream_model", "account", "operation", "error")).lower():
             continue
         result.append(row)
-        if len(result) >= safe_limit:
-            break
     return result
+
+
+def list_items(*, limit: int = 200, query: str = "", provider: str = "", status: str = "") -> list[dict[str, Any]]:
+    """Compatibility helper returning the newest matching audit rows."""
+    safe_limit = min(max(int(limit or 200), 1), 1_000)
+    return _filtered_items(query=query, provider=provider, status=status)[:safe_limit]
+
+
+def list_page(*, page: int = 1, page_size: int = 50, query: str = "", provider: str = "", status: str = "") -> dict[str, Any]:
+    """Return one newest-first audit page plus pagination metadata."""
+    safe_page = max(1, int(page or 1))
+    safe_size = min(max(int(page_size or 50), 10), 2_000)
+    rows = _filtered_items(query=query, provider=provider, status=status)
+    total = len(rows)
+    total_pages = max(1, (total + safe_size - 1) // safe_size)
+    current_page = min(safe_page, total_pages)
+    start = (current_page - 1) * safe_size
+    return {
+        "items": rows[start:start + safe_size],
+        "total": total,
+        "page": current_page,
+        "page_size": safe_size,
+        "total_pages": total_pages,
+    }
 
 
 def get_item(item_id: str) -> dict[str, Any] | None:
@@ -130,4 +151,4 @@ def summary() -> dict[str, Any]:
     failed = sum(1 for row in rows if int(row.get("status_code") or 0) >= 400)
     return {"total": total, "success": success, "failed": failed, "latest_at": rows[-1].get("created_at") if rows else 0}
 
-__all__ = ["record", "list_items", "get_item", "summary"]
+__all__ = ["record", "list_items", "list_page", "get_item", "summary"]

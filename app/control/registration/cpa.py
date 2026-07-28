@@ -233,8 +233,11 @@ def export_cpa_auth(
     email = str(account.get("email") or "").strip()
     password = str(account.get("password") or "")
     sso = str(account.get("sso") or "").strip()
-    if not email or not sso:
-        return {"ok": False, "error": "missing email or sso"}
+    # A pure external SSO import has no encrypted email/password archive.
+    # It may still mint CPA Auth through the SSO protocol while the cookie is
+    # valid.  Browser fallback remains unavailable for that branch.
+    if not sso and (not email or not password):
+        return {"ok": False, "error": "missing usable sso or email/password"}
 
     from .cpa_xai import mint_and_export
 

@@ -10,7 +10,7 @@ from .browser_confirm import mint_with_browser
 from .probe import probe_mini_response, probe_models
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
 from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
-from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth
+from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth, jwt_payload
 from .writer import write_cpa_xai_auth
 
 LogFn = Callable[[str], None]
@@ -53,12 +53,17 @@ def mint_and_export(
     """
     log = log or _noop
     email = (email or "").strip()
-    if not email or not password:
-        # Protocol can work with sso alone; password only required for browser fallback
-        if not email:
-            return {"ok": False, "email": email, "error": "missing email"}
-        if not (sso or extract_sso_from_cookies(cookies)):
-            return {"ok": False, "email": email, "error": "missing email/password"}
+    password = password or ""
+    sso_val = (sso or "").strip() or extract_sso_from_cookies(cookies)
+    # External imports may contain only a still-valid SSO.  That is sufficient
+    # for the protocol device flow; email/password are needed only for browser
+    # login fallback after that SSO has expired.
+    if not sso_val and (not email or not password):
+        return {
+            "ok": False,
+            "email": email,
+            "error": "missing usable sso or email/password for browser fallback",
+        }
 
     # Config/explicit proxy wins over shell https_proxy (common 7890 trap).
     # Thread-local pin — safe under concurrent mint workers.
@@ -66,7 +71,6 @@ def mint_and_export(
     set_runtime_proxy(resolved or None)
     log(f"mint start: {email} proxy={proxy_log_label(resolved) or '(none)'}")
 
-    sso_val = (sso or "").strip() or extract_sso_from_cookies(cookies)
     tokens: dict[str, Any] | None = None
     protocol_err: str | None = None
 
@@ -124,11 +128,11 @@ def mint_and_export(
         log("mint protocol disabled → browser")
 
     if tokens is None:
-        if not password:
+        if not email or not password:
             return {
                 "ok": False,
                 "email": email,
-                "error": protocol_err or "protocol failed and no password for browser fallback",
+                "error": protocol_err or "protocol failed and no email/password for browser fallback",
                 "protocol_error": protocol_err,
             }
         try:
@@ -161,6 +165,24 @@ def mint_and_export(
                 "protocol_error": protocol_err,
             }
 
+    if not email:
+        # Prefer ID-token identity, then access-token identity.  This keeps a
+        # pure external SSO import usable without asking the administrator to
+        # re-enter a known email address just to create a filename.
+        for candidate in (tokens.get("id_token"), tokens.get("access_token")):
+            try:
+                claims = jwt_payload(str(candidate or ""))
+            except Exception:
+                continue
+            for key in ("email", "preferred_username", "upn"):
+                value = str(claims.get(key) or "").strip()
+                if value:
+                    email = value
+                    log("mint resolved account email from OAuth identity")
+                    break
+            if email:
+                break
+
     payload = build_cpa_xai_auth(
         email=email,
         access_token=tokens["access_token"],
@@ -181,6 +203,12 @@ def mint_and_export(
         "proxy": proxy_log_label(resolved),
         "mint_method": tokens.get("mint_method") or "browser",
     }
+    # The browser fallback can obtain a fresh SSO after a real login.  It is
+    # intentionally returned only to the trusted caller; task payloads/logs
+    # never expose it.
+    refreshed_sso = str(tokens.get("refreshed_sso") or "").strip()
+    if refreshed_sso:
+        result["refreshed_sso"] = refreshed_sso
     if protocol_err and result["mint_method"] != "protocol":
         result["protocol_error"] = protocol_err
 

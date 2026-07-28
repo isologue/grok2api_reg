@@ -58,6 +58,14 @@ class AccountRepository(Protocol):
         """Soft-delete accounts (set deleted_at).  Pushes revision."""
         ...
 
+    async def rotate_account_token(
+        self,
+        old_token: str,
+        new_token: str,
+    ) -> AccountMutationResult:
+        """Atomically replace an account SSO token while preserving all account state."""
+        ...
+
     async def get_accounts(
         self,
         tokens: list[str],

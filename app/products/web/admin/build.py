@@ -26,8 +26,23 @@ class DeleteRequest(BaseModel):
 
 
 @router.get("/accounts")
-async def list_accounts():
-    return {"items": store.list(), "known_models": store.known_models()}
+async def list_accounts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=2_000),
+):
+    rows = store.list()
+    total = len(rows)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = min(page, total_pages)
+    start = (current_page - 1) * page_size
+    return {
+        "items": rows[start:start + page_size],
+        "known_models": store.known_models(),
+        "total": total,
+        "page": current_page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.post("/import")

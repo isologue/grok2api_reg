@@ -987,6 +987,7 @@
           <th style="width:36px"><input type="checkbox" class="cb" id="cb-all" onchange="toggleAll(this.checked)"></th>
           <th style="width:200px" data-i18n="account.colToken">Token</th>
           <th style="min-width:180px">邮箱 / 用户 ID</th>
+          <th class="table-center" style="width:92px">账号密码</th>
           <th class="table-center" style="width:70px" data-i18n="account.colType">类型</th>
           <th class="table-center" style="width:70px" data-i18n="account.colStatus">状态</th>
           <th data-quota-only>
@@ -1020,11 +1021,10 @@
     </div>
     <p class="page-sub" style="margin:0 0 12px">导入 CPA Auth JSON 或 ZIP 后，账号与普通账号池隔离。模型路由请在顶部「模型路由」页面管理。</p>
     <div class="table-wrap"><table><thead><tr><th>邮箱 / 用户 ID</th><th>状态</th><th>成功调用</th><th>失败调用</th><th>已同步模型</th><th>Token 过期</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="build-account-tbody"><tr><td colspan="8" class="empty-row">正在加载 Grok Build 账号池</td></tr></tbody></table></div>
-    <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px;flex-wrap:wrap">
-      <button type="button" class="pagi-btn" id="build-account-prev" onclick="changeBuildAccountPage(-1)">上一页</button>
-      <span id="build-account-page-info" style="font-size:12px;color:var(--fg-muted)"></span>
-      <button type="button" class="pagi-btn" id="build-account-next" onclick="changeBuildAccountPage(1)">下一页</button>
-      <select class="input" id="build-account-page-size" style="width:auto;min-width:82px"><option value="10">10 / 页</option><option value="20">20 / 页</option><option value="50">50 / 页</option><option value="100">100 / 页</option><option value="200">200 / 页</option><option value="500">500 / 页</option><option value="1000">1000 / 页</option><option value="2000">2000 / 页</option></select>
+    <div class="pagi" id="build-account-pagi">
+      <button type="button" class="pagi-btn" id="build-account-prev" onclick="changeBuildAccountPage(-1)" aria-label="Previous page">&#8249;</button>
+      <div class="pagi-meta"><span class="pagi-page" id="build-account-page-info">0 / 0</span><select class="toolbar-page-size" id="build-account-page-size" aria-label="Build page size"><option value="10">10 / &#39029;</option><option value="20">20 / &#39029;</option><option value="50">50 / &#39029;</option><option value="100">100 / &#39029;</option><option value="200">200 / &#39029;</option><option value="500">500 / &#39029;</option><option value="1000">1000 / &#39029;</option><option value="2000">2000 / &#39029;</option></select></div>
+      <button type="button" class="pagi-btn" id="build-account-next" onclick="changeBuildAccountPage(1)" aria-label="Next page">&#8250;</button>
     </div>
   </section>
 
@@ -1035,6 +1035,11 @@
     </div>
     <p class="page-sub" style="margin:0 0 12px">注册机自动导出和账号行内“重试 CPA 导出”任务都会在此保留结果，可点击查看日志。</p>
     <div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>开始时间</th><th>结果</th><th>操作</th></tr></thead><tbody id="cpa-task-tbody"><tr><td colspan="5" class="empty-row">正在加载 CPA 导出记录</td></tr></tbody></table></div>
+    <div class="pagi" id="cpa-task-pagi">
+      <button type="button" class="pagi-btn" id="cpa-task-prev" onclick="changeCpaTaskPage(-1)" aria-label="Previous page">&#8249;</button>
+      <div class="pagi-meta"><span class="pagi-page" id="cpa-task-page-info">0 / 0</span><select class="toolbar-page-size" id="cpa-task-page-size" aria-label="CPA task page size"><option value="10">10 / &#39029;</option><option value="20">20 / &#39029;</option><option value="50">50 / &#39029;</option><option value="100">100 / &#39029;</option><option value="200">200 / &#39029;</option><option value="500">500 / &#39029;</option><option value="1000">1000 / &#39029;</option><option value="2000">2000 / &#39029;</option></select></div>
+      <button type="button" class="pagi-btn" id="cpa-task-next" onclick="changeCpaTaskPage(1)" aria-label="Next page">&#8250;</button>
+    </div>
   </section>
 
 
@@ -1047,6 +1052,23 @@
     <div class="modal-title" id="cpa-task-log-title">CPA 导出任务日志</div>
     <div class="dialog-body"><pre id="cpa-task-log-content" style="margin:0;max-height:56vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#171717;color:#eee;border-radius:8px;padding:12px;font-size:12px;line-height:1.55"></pre></div>
     <div class="dialog-actions"><button type="button" class="dialog-btn" onclick="closeModal('modal-cpa-task-log')">关闭</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-registration-credentials">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-title">账号登录凭据</div>
+    <div class="dialog-help">仅对当前已登录的管理员展示。关闭弹窗后会立即清空已读取的密码。</div>
+    <div class="dialog-body">
+      <div class="dialog-field"><span class="dialog-label">邮箱</span><input id="registration-credential-email" class="input" type="text" readonly autocomplete="off"></div>
+      <div class="dialog-field"><span class="dialog-label">密码</span><input id="registration-credential-password" class="input" type="password" readonly autocomplete="new-password"></div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="dialog-btn" onclick="toggleRegistrationCredentialPassword()">显示 / 隐藏</button>
+      <button type="button" class="dialog-btn" onclick="copy(document.getElementById('registration-credential-email').value)">复制邮箱</button>
+      <button type="button" class="dialog-btn" onclick="copy(document.getElementById('registration-credential-password').value)">复制密码</button>
+      <button type="button" class="dialog-btn dialog-btn-primary" onclick="closeRegistrationCredentialsModal()">关闭</button>
+    </div>
   </div>
 </div>
 
@@ -1227,8 +1249,16 @@ function waitI18n() {
 
 // Grok Build CPA Auth account pool shares the account-management page.
 let cpaTasks = [];
+let cpaTaskPage = 1;
+let cpaTaskTotal = 0;
+let cpaTaskTotalPages = 1;
+const CPA_TASK_PAGE_SIZE_KEY = 'admin.cpa_tasks.page_size';
+const CPA_TASK_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000, 2000];
+let cpaTaskPageSize = Number(localStorage.getItem(CPA_TASK_PAGE_SIZE_KEY)) || 50;
 let buildAccounts = [];
 let buildAccountPage = 1;
+let buildAccountTotal = 0;
+let buildAccountTotalPages = 1;
 const BUILD_ACCOUNT_PAGE_SIZE_KEY = 'admin.build_accounts.page_size';
 const BUILD_ACCOUNT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000, 2000];
 let buildAccountPageSize = Number(localStorage.getItem(BUILD_ACCOUNT_PAGE_SIZE_KEY)) || 50;
@@ -1243,13 +1273,11 @@ function renderBuildAccounts() {
   const prev = document.getElementById('build-account-prev');
   const next = document.getElementById('build-account-next');
   if (!body || !count) return;
-  const total = buildAccounts.length;
-  const totalPages = Math.max(1, Math.ceil(total / buildAccountPageSize));
-  buildAccountPage = Math.min(Math.max(1, buildAccountPage), totalPages);
-  const start = (buildAccountPage - 1) * buildAccountPageSize;
-  const items = buildAccounts.slice(start, start + buildAccountPageSize);
+  const total = buildAccountTotal;
+  const totalPages = buildAccountTotalPages;
+  const items = buildAccounts;
   count.textContent = String(total);
-  if (info) info.textContent = `${BUILD_TEXT.page} ${buildAccountPage} ${BUILD_TEXT.page_of} ${totalPages} ${BUILD_TEXT.page_suffix}`;
+  if (info) info.textContent = `${BUILD_TEXT.page} ${total ? buildAccountPage : 0} ${BUILD_TEXT.page_of} ${totalPages} ${BUILD_TEXT.page_suffix}`;
   if (prev) prev.disabled = buildAccountPage <= 1;
   if (next) next.disabled = buildAccountPage >= totalPages;
   body.innerHTML = items.length ? items.map(item => `
@@ -1264,16 +1292,22 @@ function renderBuildAccounts() {
       <td><button class="pagi-btn" onclick="syncBuildAccount('${_html(item.id)}')">${BUILD_TEXT.sync}</button> <button class="pagi-btn" onclick="toggleBuildAccount('${_html(item.id)}', ${!item.enabled})">${item.enabled ? BUILD_TEXT.disable : BUILD_TEXT.enable}</button> <button class="pagi-btn" onclick="deleteBuildAccount('${_html(item.id)}')">${BUILD_TEXT.delete}</button></td>
     </tr>`).join('') : `<tr><td colspan="8" class="empty-row">${BUILD_TEXT.empty_accounts}</td></tr>`;
 }
-function changeBuildAccountPage(delta) { buildAccountPage += Number(delta) || 0; renderBuildAccounts(); }
-function setBuildAccountPageSize(value) { const size = Number(value); buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(size) ? size : 50; localStorage.setItem(BUILD_ACCOUNT_PAGE_SIZE_KEY, String(buildAccountPageSize)); buildAccountPage = 1; renderBuildAccounts(); }
+function changeBuildAccountPage(delta) { const target = buildAccountPage + (Number(delta) || 0); if (target < 1 || target > buildAccountTotalPages) return; buildAccountPage = target; loadBuildAccounts(); }
+function setBuildAccountPageSize(value) { const size = Number(value); buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(size) ? size : 50; localStorage.setItem(BUILD_ACCOUNT_PAGE_SIZE_KEY, String(buildAccountPageSize)); buildAccountPage = 1; loadBuildAccounts(); }
 function cpaTaskStateLabel(state) {
   return ({ queued:'队列中', running:'运行中', completed:'已完成', failed:'失败', legacy:'旧数据' })[state] || state || '-';
 }
 function renderCpaTasks() {
   const body = document.getElementById('cpa-task-tbody');
   const count = document.getElementById('cpa-task-count');
+  const info = document.getElementById('cpa-task-page-info');
+  const prev = document.getElementById('cpa-task-prev');
+  const next = document.getElementById('cpa-task-next');
   if (!body || !count) return;
-  count.textContent = String(cpaTasks.length);
+  count.textContent = String(cpaTaskTotal);
+  if (info) info.textContent = `${BUILD_TEXT.page} ${cpaTaskTotal ? cpaTaskPage : 0} ${BUILD_TEXT.page_of} ${cpaTaskTotalPages} ${BUILD_TEXT.page_suffix}`;
+  if (prev) prev.disabled = cpaTaskPage <= 1;
+  if (next) next.disabled = cpaTaskPage >= cpaTaskTotalPages;
   body.innerHTML = cpaTasks.length ? cpaTasks.map(item => {
     const exported = Number(item.exported_count || 0);
     const failed = Number(item.failed_count || 0);
@@ -1286,17 +1320,18 @@ function renderCpaTasks() {
 async function loadCpaTasks() {
   const body = document.getElementById('cpa-task-tbody');
   try {
-    const data = await _api('GET', '/registration/cpa-auths/tasks');
-    cpaTasks = (Array.isArray(data.items) ? data.items : []).sort((left, right) => {
-      const leftAt = Number(left?.sort_at || Date.parse(left?.started_at || '') || 0);
-      const rightAt = Number(right?.sort_at || Date.parse(right?.started_at || '') || 0);
-      return rightAt - leftAt || String(right?.task_id || '').localeCompare(String(left?.task_id || ''));
-    });
+    const data = await _api('GET', `/registration/cpa-auths/tasks?page=${cpaTaskPage}&page_size=${cpaTaskPageSize}`);
+    cpaTasks = Array.isArray(data.items) ? data.items : [];
+    cpaTaskTotal = Number(data.total || 0);
+    cpaTaskTotalPages = Math.max(1, Number(data.total_pages || 1));
+    cpaTaskPage = Math.min(Math.max(1, Number(data.page || cpaTaskPage)), cpaTaskTotalPages);
     renderCpaTasks();
   } catch (error) {
     if (body) body.innerHTML = `<tr><td colspan="5" class="empty-row" style="color:#b42318">CPA 导出记录加载失败：${_html(error.message)}</td></tr>`;
   }
 }
+function changeCpaTaskPage(delta) { const target = cpaTaskPage + (Number(delta) || 0); if (target < 1 || target > cpaTaskTotalPages) return; cpaTaskPage = target; loadCpaTasks(); }
+function setCpaTaskPageSize(value) { const size = Number(value); cpaTaskPageSize = CPA_TASK_PAGE_SIZE_OPTIONS.includes(size) ? size : 50; localStorage.setItem(CPA_TASK_PAGE_SIZE_KEY, String(cpaTaskPageSize)); cpaTaskPage = 1; loadCpaTasks(); }
 async function openCpaTaskLog(taskId) {
   const title = document.getElementById('cpa-task-log-title');
   const content = document.getElementById('cpa-task-log-content');
@@ -1314,8 +1349,11 @@ async function openCpaTaskLog(taskId) {
 async function loadBuildAccounts() {
   const body = document.getElementById('build-account-tbody');
   try {
-    const accounts = await _api('GET', '/build/accounts');
+    const accounts = await _api('GET', `/build/accounts?page=${buildAccountPage}&page_size=${buildAccountPageSize}`);
     buildAccounts = Array.isArray(accounts.items) ? accounts.items : [];
+    buildAccountTotal = Number(accounts.total || 0);
+    buildAccountTotalPages = Math.max(1, Number(accounts.total_pages || 1));
+    buildAccountPage = Math.min(Math.max(1, Number(accounts.page || buildAccountPage)), buildAccountTotalPages);
     renderBuildAccounts();
   } catch (error) {
     if (body) body.innerHTML = `<tr><td colspan="6" class="empty-row" style="color:#b42318">${BUILD_TEXT.load_failed}${_html(error.message)}</td></tr>`;
@@ -1341,6 +1379,8 @@ async function importBuildCpa(file) {
 document.getElementById('build-import-file')?.addEventListener('change', event => { importBuildCpa(event.target.files?.[0]); event.target.value = ''; });
 const buildPageSizeSelect = document.getElementById('build-account-page-size');
 if (buildPageSizeSelect) { buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(buildAccountPageSize) ? buildAccountPageSize : 50; buildPageSizeSelect.value = String(buildAccountPageSize); buildPageSizeSelect.addEventListener('change', event => setBuildAccountPageSize(event.target.value)); }
+const cpaTaskPageSizeSelect = document.getElementById('cpa-task-page-size');
+if (cpaTaskPageSizeSelect) { cpaTaskPageSize = CPA_TASK_PAGE_SIZE_OPTIONS.includes(cpaTaskPageSize) ? cpaTaskPageSize : 50; cpaTaskPageSizeSelect.value = String(cpaTaskPageSize); cpaTaskPageSizeSelect.addEventListener('change', event => setCpaTaskPageSize(event.target.value)); }
 
 (async () => {
   await waitI18n();
@@ -1655,7 +1695,7 @@ function renderTable(view = getTokenView()) {
 
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(rowHtml).join('')
-    : `<tr><td colspan="11" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
+    : `<tr><td colspan="12" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
   $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
   $('section-table-count', total);
@@ -1670,7 +1710,7 @@ function rowHtml(t) {
   const isDisabled = t.status === 'disabled';
   const canManageNsfw = isManageableStatus(t.status);
   const isRefreshing = refreshingTokens.has(t.token);
-  const hasRegistrationArchive = Boolean(t.has_registration_archive);
+  const hasLoginCredentials = Boolean(t.has_login_credentials);
   const isCpaRetrying = cpaRetryingTokens.has(t.token);
   const success = t.use_count || 0;
   const fail = t.fail_count || 0;
@@ -1700,6 +1740,7 @@ function rowHtml(t) {
         <div>${xe(t.email || '-')}</div>
         ${t.user_id ? `<div style="color:#9a9a9a;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">${xe(t.user_id)}</div>` : ''}
       </td>
+      <td class="table-center">${t.has_login_credentials ? `<button type="button" class="pagi-btn" onclick="viewRegistrationCredentials('${xe(t.token)}')">是</button>` : '<span style="color:#9a9a9a">否</span>'}</td>
       <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
     <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
@@ -1717,9 +1758,9 @@ function rowHtml(t) {
       <button onclick="refreshOne('${xe(t.token)}')" class="row-icon-btn${isRefreshing ? ' is-loading' : ''}" data-tip="${xe(isRefreshing ? tr('account.refreshing', { n: 1 }, '正在刷新 1 个账户…') : tr('account.actionRefresh', null, '刷新 Usage'))}" aria-label="${xe(tr('account.actionRefresh', null, '刷新 Usage'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
       </button>
-      ${hasRegistrationArchive ? `<button onclick="retryCpaExport('${xe(t.token)}')" class="row-icon-btn${isCpaRetrying ? ' is-loading' : ''}" data-tip="${xe(isCpaRetrying ? tr('account.retryCpaInProgress', null, '正在重试 CPA 导出…') : tr('account.actionRetryCpa', null, '重试 CPA 导出'))}" aria-label="${xe(tr('account.actionRetryCpa', null, '重试 CPA 导出'))}">
+      <button onclick="retryCpaExport('${xe(t.token)}', ${hasLoginCredentials ? 'true' : 'false'})" class="row-icon-btn${isCpaRetrying ? ' is-loading' : ''}" data-tip="${xe(isCpaRetrying ? '\u6b63\u5728\u91cd\u8bd5 CPA \u5bfc\u51fa\u2026' : (hasLoginCredentials ? '\u91cd\u8bd5 CPA \u5bfc\u51fa\uff08\u534f\u8bae\u5931\u8d25\u53ef\u91cd\u65b0\u767b\u5f55\u5e76\u66f4\u65b0 SSO\uff09' : '\u91cd\u8bd5 CPA \u5bfc\u51fa\uff08\u4ec5\u4f7f\u7528\u5f53\u524d SSO \u534f\u8bae\uff09'))}" aria-label="${xe('\u91cd\u8bd5 CPA \u5bfc\u51fa')}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 1 0-2.35 5.3"/><path d="M20 4v7h-7"/><path d="m12 8 3 3-3 3"/><path d="M9 11h6"/></svg>
-      </button>` : ''}
+      </button>
       <button onclick="openEdit('${xe(t.token)}')" class="row-icon-btn" data-tip="${xe(tr('account.actionEdit', null, '编辑'))}" aria-label="${xe(tr('account.actionEdit', null, '编辑'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="m4 20 4.5-1 9.5-9.5-3.5-3.5L5 15.5z"/><path d="m13.5 5.5 3.5 3.5"/></svg>
       </button>
@@ -2168,21 +2209,54 @@ async function cancelBatch() {
 }
 
 // ── Refresh ────────────────────────────────────────────────────────────────
-// Manual CPA Auth export retry for an account with an encrypted registration archive.
+async function viewRegistrationCredentials(token) {
+  try {
+    const data = await _api('POST', '/registration/archives/credentials', { token });
+    document.getElementById('registration-credential-email').value = data.email || '';
+    const password = document.getElementById('registration-credential-password');
+    password.value = data.password || '';
+    password.type = 'password';
+    openModal('modal-registration-credentials');
+  } catch (error) {
+    showToast(`读取账号密码失败: ${error.message}`, 'error');
+  }
+}
+
+function toggleRegistrationCredentialPassword() {
+  const input = document.getElementById('registration-credential-password');
+  if (input) input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+function clearRegistrationCredentials() {
+  const email = document.getElementById('registration-credential-email');
+  const password = document.getElementById('registration-credential-password');
+  if (email) email.value = '';
+  if (password) { password.value = ''; password.type = 'password'; }
+}
+
+function closeRegistrationCredentialsModal() {
+  clearRegistrationCredentials();
+  closeModal('modal-registration-credentials');
+}
+
+// Manual CPA Auth retry supports both saved registration archives and external SSO imports.
 const cpaRetrySleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function retryCpaExport(token) {
+async function retryCpaExport(token, hasLoginCredentials = false) {
   if (cpaRetryingTokens.has(token)) return;
-  openConfirm('重试 CPA 导出', `将使用此账号已保存的注册档案重试导出 CPA Auth，导出成功后会自动导入 Build 账号池。`, async () => {
+  const detail = hasLoginCredentials
+    ? '\u5c06\u5148\u4f7f\u7528\u5f53\u524d SSO \u534f\u8bae\u5bfc\u51fa CPA Auth\uff1b\u82e5 SSO \u5df2\u5931\u6548\uff0c\u4f1a\u4f7f\u7528\u5df2\u52a0\u5bc6\u4fdd\u5b58\u7684\u90ae\u7bb1\u548c\u5bc6\u7801\u91cd\u65b0\u767b\u5f55\u3002\u91cd\u65b0\u767b\u5f55\u62ff\u5230\u7684\u65b0 SSO \u4f1a\u81ea\u52a8\u66ff\u6362\u666e\u901a\u8d26\u53f7\u6c60\u4e2d\u7684\u65e7 SSO\u3002\u5bfc\u51fa\u6210\u529f\u540e\u4f1a\u81ea\u52a8\u5bfc\u5165 Build \u8d26\u53f7\u6c60\u3002'
+    : '\u8fd9\u662f\u5916\u90e8\u5bfc\u5165\u7684\u7eaf SSO \u8d26\u53f7\u3002\u5c06\u4ec5\u4f7f\u7528\u5f53\u524d SSO \u8fdb\u884c\u534f\u8bae CPA \u5bfc\u51fa\uff1b\u82e5 SSO \u5df2\u8fc7\u671f\uff0c\u7531\u4e8e\u6ca1\u6709\u4fdd\u5b58\u767b\u5f55\u51ed\u636e\uff0c\u65e0\u6cd5\u91cd\u65b0\u767b\u5f55\u6062\u590d\u3002\u5bfc\u51fa\u6210\u529f\u540e\u4f1a\u81ea\u52a8\u5bfc\u5165 Build \u8d26\u53f7\u6c60\u3002';
+  openConfirm('\u91cd\u8bd5 CPA \u5bfc\u51fa', detail, async () => {
     cpaRetryingTokens.add(token);
     renderTable();
     try {
       const task = await _api('POST', '/registration/cpa-auths/retry', { token });
       await loadCpaTasks();
-      showToast('已启动 CPA 导出重试，正在后台处理…', 'info');
+      showToast('\u5df2\u542f\u52a8 CPA \u5bfc\u51fa\u91cd\u8bd5\uff0c\u6b63\u5728\u540e\u53f0\u5904\u7406\u2026', 'info');
       await watchCpaRetry(task.task_id);
     } catch (e) {
-      showToast(`启动 CPA 重试导出失败: ${e.message}`, 'error');
+      showToast(`\u542f\u52a8 CPA \u91cd\u8bd5\u5bfc\u51fa\u5931\u8d25: ${e.message}`, 'error');
     } finally {
       cpaRetryingTokens.delete(token);
       renderTable();
@@ -2389,7 +2463,10 @@ function batchNSFWAll() {
 
 // ── Modal ──────────────────────────────────────────────────────────────────
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function closeModal(id) {
+  if (id === 'modal-registration-credentials') clearRegistrationCredentials();
+  document.getElementById(id).classList.remove('open');
+}
 function openConfirm(title, body, cb) {
   _cb = async () => { closeModal('modal-confirm'); await cb(); };
   document.getElementById('confirm-title').textContent = title;
@@ -2397,7 +2474,11 @@ function openConfirm(title, body, cb) {
   openModal('modal-confirm');
 }
 document.querySelectorAll('.modal-overlay').forEach(el =>
-  el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); }));
+  el.addEventListener('click', e => {
+    if (e.target !== el) return;
+    if (el.id === 'modal-registration-credentials') clearRegistrationCredentials();
+    el.classList.remove('open');
+  }));
 
 const _tooltipEl = document.createElement('div');
 _tooltipEl.className = 'admin-tooltip';

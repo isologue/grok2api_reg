@@ -283,7 +283,11 @@ class LocalAccountRepository:
                 updated_at     = excluded.updated_at,
                 tags           = excluded.tags,
                 quota_console  = excluded.quota_console,
-                ext            = excluded.ext,
+                ext            = CASE
+                    WHEN excluded.ext = '{{}}' THEN ext
+                    WHEN ext = '{{}}' THEN excluded.ext
+                    ELSE json_patch(ext, excluded.ext)
+                END,
                 revision       = excluded.revision
             """,
             rows,
@@ -497,6 +501,64 @@ class LocalAccountRepository:
                 count = conn.execute("SELECT changes()").fetchone()[0]
                 conn.commit()
                 return AccountMutationResult(deleted=count, revision=rev)
+
+        async with self._lock:
+            return await asyncio.to_thread(_sync)
+
+    async def rotate_account_token(
+        self,
+        old_token: str,
+        new_token: str,
+    ) -> AccountMutationResult:
+        """Atomically rotate a live account's SSO primary key without losing state."""
+        old_token = AccountRecord.model_validate({"token": old_token}).token
+        new_token = AccountRecord.model_validate({"token": new_token}).token
+        if old_token == new_token:
+            return AccountMutationResult()
+
+        def _sync() -> AccountMutationResult:
+            with closing(self._connect()) as conn:
+                source = conn.execute(
+                    f"SELECT * FROM {_TBL} WHERE token = ? AND deleted_at IS NULL", (old_token,)
+                ).fetchone()
+                if source is None:
+                    return AccountMutationResult()
+                existing = conn.execute(
+                    f"SELECT 1 FROM {_TBL} WHERE token = ?", (new_token,)
+                ).fetchone()
+                if existing is not None:
+                    raise ValueError("new SSO token already belongs to an existing account")
+
+                # Keep an old-token tombstone at this revision so every runtime
+                # process receives both the new record and the old-token delete.
+                # A direct primary-key UPDATE would leave stale old SSO entries
+                # in already-running data-plane caches.
+                rev = self._bump_revision(conn)
+                ts = now_ms()
+                replacement = dict(source)
+                replacement.update({
+                    "token": new_token,
+                    "updated_at": ts,
+                    "deleted_at": None,
+                    "revision": rev,
+                })
+                columns = list(replacement)
+                placeholders = ", ".join(f":{column}" for column in columns)
+                conn.execute(
+                    f"INSERT INTO {_TBL} ({', '.join(columns)}) VALUES ({placeholders})",
+                    replacement,
+                )
+                conn.execute(
+                    f"UPDATE {_TBL} SET deleted_at = ?, updated_at = ?, revision = ? "
+                    f"WHERE token = ? AND deleted_at IS NULL",
+                    (ts, ts, rev, old_token),
+                )
+                count = conn.execute("SELECT changes()").fetchone()[0]
+                if count != 1:
+                    conn.rollback()
+                    return AccountMutationResult()
+                conn.commit()
+                return AccountMutationResult(upserted=1, deleted=1, revision=rev)
 
         async with self._lock:
             return await asyncio.to_thread(_sync)

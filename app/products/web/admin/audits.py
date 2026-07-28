@@ -3,19 +3,23 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.platform.request_audit import get_item, list_items, summary
+from app.platform.request_audit import get_item, list_page, summary
 
 router = APIRouter(prefix="/audits", tags=["Admin - Request Audits"])
 
 
 @router.get("")
 async def list_request_audits(
-    limit: int = Query(200, ge=1, le=1_000),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=2_000),
+    # Compatibility with the pre-pagination endpoint; explicit page_size wins.
+    limit: int | None = Query(None, ge=10, le=2_000),
     query: str = Query("", max_length=255),
     provider: str = Query("", max_length=64),
     status: str = Query("", max_length=8),
 ):
-    return {"items": list_items(limit=limit, query=query, provider=provider, status=status)}
+    effective_size = page_size if limit is None or page_size != 50 else limit
+    return list_page(page=page, page_size=effective_size, query=query, provider=provider, status=status)
 
 
 @router.get("/summary")
