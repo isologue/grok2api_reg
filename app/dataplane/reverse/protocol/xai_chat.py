@@ -460,32 +460,70 @@ class StreamAdapter:
     # ------------------------------------------------------------------
 
     def _handle_card(self, card_raw: dict) -> list[FrameEvent]:
-        """Cache card data; emit image event on progress=100."""
+        """Cache card updates and emit an image only when its final URL exists.
+
+        xAI sends image cards incrementally.  A final ``progress=100`` update
+        may contain only the changed progress field, while ``imageUrl`` was sent
+        in an earlier update for the same card.  Merge the partial card before
+        reading it so an incomplete update cannot turn into a ``KeyError`` and
+        fail the whole image-generation TaskGroup.
+        """
         try:
-            jd = orjson.loads(card_raw["jsonData"])
+            incoming = orjson.loads(card_raw["jsonData"])
         except (orjson.JSONDecodeError, ValueError, TypeError, KeyError):
             return []
+        if not isinstance(incoming, dict):
+            return []
 
-        card_id = jd.get("id", "")
-        self._card_cache[card_id] = jd
+        card_id = str(incoming.get("id") or "")
+        previous = self._card_cache.get(card_id)
+        if isinstance(previous, dict):
+            jd = {**previous, **incoming}
+            old_chunk = previous.get("image_chunk")
+            new_chunk = incoming.get("image_chunk")
+            if isinstance(old_chunk, dict) and isinstance(new_chunk, dict):
+                jd["image_chunk"] = {**old_chunk, **new_chunk}
+        else:
+            jd = incoming
+        if card_id:
+            self._card_cache[card_id] = jd
 
         chunk = jd.get("image_chunk")
-        if chunk:
-            progress = chunk.get("progress")
-            uuid = chunk.get("imageUuid", "")
-            events: list[FrameEvent] = []
-            try:
-                if progress is not None:
-                    events.append(FrameEvent("image_progress", str(int(progress)), uuid))
-            except (TypeError, ValueError):
-                pass
-            if chunk.get("progress") == 100 and not chunk.get("moderated"):
-                url = _IMAGE_BASE + chunk["imageUrl"]
-                self.image_urls.append((url, uuid))
-                events.append(FrameEvent("image", url, uuid))
+        if not isinstance(chunk, dict):
+            return []
+
+        progress = chunk.get("progress")
+        uuid = str(chunk.get("imageUuid") or "")
+        events: list[FrameEvent] = []
+        try:
+            progress_value = int(progress) if progress is not None else None
+            if progress_value is not None:
+                events.append(FrameEvent("image_progress", str(progress_value), uuid))
+        except (TypeError, ValueError):
+            progress_value = None
+
+        if progress_value != 100 or chunk.get("moderated"):
             return events
 
-        return []
+        raw_url = chunk.get("imageUrl") or chunk.get("image_url") or chunk.get("url")
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            # Do not crash the request. A later card update may still carry the
+            # URL; otherwise callers receive the normal "no images" upstream
+            # error rather than an unhandled 500 caused by our parser.
+            logger.warning(
+                "image card completed without image URL: card_id={} image_id={} fields={}",
+                card_id[:16],
+                uuid[:16],
+                sorted(str(key) for key in chunk.keys()),
+            )
+            return events
+
+        raw_url = raw_url.strip()
+        url = raw_url if raw_url.startswith(("https://", "http://")) else _IMAGE_BASE + raw_url.lstrip("/")
+        if (url, uuid) not in self.image_urls:
+            self.image_urls.append((url, uuid))
+            events.append(FrameEvent("image", url, uuid))
+        return events
 
     # ------------------------------------------------------------------
     # Token cleaning — <grok:render> → markdown
