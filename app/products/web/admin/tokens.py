@@ -29,6 +29,7 @@ from app.control.account.commands import (
 from app.control.account.enums import AccountStatus
 from app.control.account.state_machine import is_manageable
 from app.control.registration.archive import ARCHIVE_EXT_KEY, decrypt_profile
+from app.control.build import store as build_account_store
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -142,6 +143,41 @@ def _registration_identity(ext: dict | None) -> tuple[str, str, bool]:
     return email, user_id, has_login_credentials
 
 
+def _identity_key(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _build_identity_index() -> tuple[set[str], set[str]]:
+    """Return Build-pool identities without exposing any OAuth material."""
+    emails: set[str] = set()
+    user_ids: set[str] = set()
+    try:
+        rows = build_account_store.list()
+    except Exception:  # The normal pool must remain visible if Build storage is unreadable.
+        return emails, user_ids
+    for item in rows:
+        email = _identity_key(item.get("email"))
+        user_id = _identity_key(item.get("user_id"))
+        if email:
+            emails.add(email)
+        if user_id:
+            user_ids.add(user_id)
+    return emails, user_ids
+
+
+def _annotate_cpa_auth_status(payloads: list[dict]) -> list[dict]:
+    """Mark a normal account exported when the isolated Build pool has its identity."""
+    build_emails, build_user_ids = _build_identity_index()
+    for item in payloads:
+        email = _identity_key(item.get("email"))
+        user_id = _identity_key(item.get("user_id"))
+        item["has_cpa_auth"] = bool(
+            (email and email in build_emails)
+            or (user_id and user_id in build_user_ids)
+        )
+    return payloads
+
+
 def _serialize_record(r) -> dict:
     email, user_id, has_login_credentials = _registration_identity(r.ext if isinstance(r.ext, dict) else {})
     return {
@@ -208,33 +244,34 @@ async def _list_all_records(repo: "AccountRepository") -> list:
 async def _list_token_payloads(repo: "AccountRepository") -> list[dict]:
     fast_list = getattr(repo, "list_token_payloads", None)
     if not callable(fast_list):
-        return [_serialize_record(r) for r in await _list_all_records(repo)]
+        return _annotate_cpa_auth_status([
+            _serialize_record(record) for record in await _list_all_records(repo)
+        ])
 
     payloads = await fast_list()
     # Local SQLite fast-listing avoids loading encrypted ext data, but the
     # account page also needs safe derived fields (email/user ID/capability).
     # Rehydrate records server-side only; never put archive/password/SSO in
-    # the response.  Backends that already provide these fields skip the read.
-    if not payloads or all("has_login_credentials" in item for item in payloads):
-        return payloads
-    tokens = [str(item.get("token") or "") for item in payloads if item.get("token")]
-    records = await repo.get_accounts(tokens)
-    identities = {
-        record.token: _serialize_record(record)
-        for record in records
-        if not record.is_deleted()
-    }
-    for item in payloads:
-        identity = identities.get(str(item.get("token") or ""))
-        if identity is None:
-            item.setdefault("email", "")
-            item.setdefault("user_id", "")
-            item.setdefault("has_login_credentials", False)
-            continue
-        item["email"] = identity["email"]
-        item["user_id"] = identity["user_id"]
-        item["has_login_credentials"] = identity["has_login_credentials"]
-    return payloads
+    # the response.
+    if payloads and not all("has_login_credentials" in item for item in payloads):
+        tokens = [str(item.get("token") or "") for item in payloads if item.get("token")]
+        records = await repo.get_accounts(tokens)
+        identities = {
+            record.token: _serialize_record(record)
+            for record in records
+            if not record.is_deleted()
+        }
+        for item in payloads:
+            identity = identities.get(str(item.get("token") or ""))
+            if identity is None:
+                item.setdefault("email", "")
+                item.setdefault("user_id", "")
+                item.setdefault("has_login_credentials", False)
+                continue
+            item["email"] = identity["email"]
+            item["user_id"] = identity["user_id"]
+            item["has_login_credentials"] = identity["has_login_credentials"]
+    return _annotate_cpa_auth_status(payloads)
 
 
 async def _list_invalid_tokens(repo: "AccountRepository") -> list[str]:

@@ -48,6 +48,8 @@ services:
       context: .
       dockerfile: Dockerfile.registration
     container_name: grok2api
+    # Reap short-lived Chromium/Xvfb descendants from CPA browser fallback.
+    init: true
     restart: unless-stopped
     ports:
       - "${HOST_PORT:-8000}:${SERVER_PORT:-8000}"

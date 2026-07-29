@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -33,6 +36,52 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 LogFn = Callable[[str], None]
+
+
+# Manual CPA retries run in the web process, unlike the registration worker.
+# Keep one virtual display for that process and give every Chromium instance a
+# unique profile/CDP port; DrissionPage otherwise waits for a browser that
+# exits immediately when DISPLAY is absent or a profile/port is shared.
+_display_lock = threading.RLock()
+_mint_display: Any | None = None
+_browser_artifacts_lock = threading.RLock()
+_browser_profiles: dict[int, Path] = {}
+
+
+def _free_debug_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _ensure_mint_display(log: LogFn) -> None:
+    """Start one Xvfb for headed CPA browser fallback when the web process has no DISPLAY."""
+    global _mint_display
+    if os.name == "nt" or os.environ.get("DISPLAY"):
+        return
+    with _display_lock:
+        if os.environ.get("DISPLAY"):
+            return
+        if _mint_display is not None:
+            return
+        try:
+            from pyvirtualdisplay import Display
+
+            display = Display(visible=0, size=(1920, 1080))
+            display.start()
+            _mint_display = display
+            log(f"browser Xvfb started DISPLAY={os.environ.get('DISPLAY', '')!r}")
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserConfirmError(f"unable to start Xvfb for headed CPA browser: {exc}") from exc
+
+
+def _cleanup_browser_profile(browser: Any | None) -> None:
+    if browser is None:
+        return
+    with _browser_artifacts_lock:
+        profile = _browser_profiles.pop(id(browser), None)
+    if profile is not None:
+        shutil.rmtree(profile, ignore_errors=True)
 
 
 def _noop_log(_: str) -> None:
@@ -196,7 +245,6 @@ def create_standalone_page(
 
     if opts is None:
         opts = ChromiumOptions()
-        opts.auto_port()
         opts.set_timeouts(base=2)
         for flag in (
             "--disable-gpu",
@@ -208,13 +256,16 @@ def create_standalone_page(
             "--window-size=1280,900",
         ):
             opts.set_argument(flag)
-        ext = str(_pkg_root / "turnstilePatch")
+        ext = str(_pkg_root / "turnstile_patch")
         if os.path.isdir(ext):
             try:
                 opts.add_extension(ext)
                 log(f"added extension {ext}")
             except Exception as e:  # noqa: BLE001
                 log(f"extension add failed: {e}")
+
+    if not headless:
+        _ensure_mint_display(log)
 
     if headless:
         try:
@@ -228,6 +279,17 @@ def create_standalone_page(
         except Exception:
             pass
         log(f"headed browser DISPLAY={os.environ.get('DISPLAY', '')!r}")
+
+    # Never use ChromiumOptions.auto_port() here. In the web process it may
+    # reuse a stale DrissionPage profile/port and surfaces only as a generic
+    # BrowserConnectError after roughly 30 seconds.
+    profile_dir = Path(tempfile.mkdtemp(prefix="grok-cpa-mint-"))
+    try:
+        opts.set_user_data_path(str(profile_dir))
+        opts.set_local_port(_free_debug_port())
+    except Exception:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
 
     for cand in (
         "/usr/bin/chromium",
@@ -253,8 +315,20 @@ def create_standalone_page(
     else:
         log("browser proxy=(none)")
 
-    browser = Chromium(opts)
-    page = browser.latest_tab
+    browser = None
+    try:
+        browser = Chromium(opts)
+        page = browser.latest_tab
+    except Exception:
+        if browser is not None:
+            try:
+                browser.quit()
+            except Exception:
+                pass
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
+    with _browser_artifacts_lock:
+        _browser_profiles[id(browser)] = profile_dir
     log("standalone chromium started")
     return browser, page
 
@@ -264,6 +338,8 @@ def close_standalone(browser: Any) -> None:
         browser.quit()
     except Exception:
         pass
+    finally:
+        _cleanup_browser_profile(browser)
 
 
 # ── mint browser reuse (per-thread) ──

@@ -988,6 +988,7 @@
           <th style="width:200px" data-i18n="account.colToken">Token</th>
           <th style="min-width:180px">邮箱 / 用户 ID</th>
           <th class="table-center" style="width:92px">账号密码</th>
+           <th class="table-center" style="width:118px">&#26159;&#21542;&#23548;&#20986; CPA Auth</th>
           <th class="table-center" style="width:70px" data-i18n="account.colType">类型</th>
           <th class="table-center" style="width:70px" data-i18n="account.colStatus">状态</th>
           <th data-quota-only>
@@ -1362,7 +1363,7 @@ async function loadBuildAccounts() {
 }
 async function syncBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/sync`); showToast(BUILD_TEXT.sync_ok, 'success'); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.sync_failed}${error.message}`, 'error'); } }
 async function toggleBuildAccount(id, enabled) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/toggle`, { enabled }); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.toggle_failed}${error.message}`, 'error'); } }
-async function deleteBuildAccount(id) { if (!confirm(BUILD_TEXT.confirm_delete_account)) return; try { await _api('DELETE', '/build/accounts', { ids: [id] }); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.delete_failed}${error.message}`, 'error'); } }
+async function deleteBuildAccount(id) { if (!confirm(BUILD_TEXT.confirm_delete_account)) return; try { await _api('DELETE', '/build/accounts', { ids: [id] }); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.delete_failed}${error.message}`, 'error'); } }
 async function importBuildCpa(file) {
   if (!file) return;
   try {
@@ -1373,7 +1374,7 @@ async function importBuildCpa(file) {
     if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || `HTTP ${response.status}`); }
     const result = await response.json();
     showToast(`${BUILD_TEXT.import_ok} ${result.added || 0} / ${BUILD_TEXT.updated} ${result.updated || 0} / ${BUILD_TEXT.skipped} ${result.skipped || 0}`, 'success');
-    await loadBuildAccounts();
+    await Promise.all([loadBuildAccounts(), load()]);
   } catch (error) { showToast(`${BUILD_TEXT.import_failed}${error.message}`, 'error'); }
 }
 document.getElementById('build-import-file')?.addEventListener('change', event => { importBuildCpa(event.target.files?.[0]); event.target.value = ''; });
@@ -1395,6 +1396,7 @@ if (cpaTaskPageSizeSelect) { cpaTaskPageSize = CPA_TASK_PAGE_SIZE_OPTIONS.includ
   // CPA auto-export runs in the registration worker process. Refresh only the
   // related sections so a completed import is visible without restarting/F5.
   window.setInterval(() => {
+    load().catch(() => {});
     loadBuildAccounts().catch(() => {});
     loadCpaTasks().catch(() => {});
   }, 12_000);
@@ -1695,7 +1697,7 @@ function renderTable(view = getTokenView()) {
 
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(rowHtml).join('')
-    : `<tr><td colspan="12" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
+    : `<tr><td colspan="13" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
   $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
   $('section-table-count', total);
@@ -1741,6 +1743,7 @@ function rowHtml(t) {
         ${t.user_id ? `<div style="color:#9a9a9a;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">${xe(t.user_id)}</div>` : ''}
       </td>
       <td class="table-center">${t.has_login_credentials ? `<button type="button" class="pagi-btn" onclick="viewRegistrationCredentials('${xe(t.token)}')">是</button>` : '<span style="color:#9a9a9a">否</span>'}</td>
+      <td class="table-center">${t.has_cpa_auth ? '<span class="badge badge-active">&#26159;</span>' : '<span style="color:#9a9a9a">&#21542;</span>'}</td>
       <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
     <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
