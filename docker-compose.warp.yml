@@ -28,7 +28,7 @@ services:
     container_name: privoxy
     restart: unless-stopped
     ports:
-      - "127.0.0.1:40080:8118"
+      - "127.0.0.1:40081:8118"
     depends_on:
       - warp-proxy
 
