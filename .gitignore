@@ -46,9 +46,14 @@ logs/
 data/
 app/data/
 
-# Source module (the generic build/ rule above must not hide this package)
+# Source modules (the generic build/ rule above must not hide these packages)
 !app/control/build/
 !app/control/build/**
+!app/products/build/
+!app/products/build/**
+# Keep local Python bytecode out after re-including the source package above.
+app/products/build/__pycache__/
+app/products/build/**/*.py[cod]
 
 # Testing
 .pytest_cache/

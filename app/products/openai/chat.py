@@ -394,6 +394,7 @@ async def _stream_chat(
     model_config_override: dict | None = None,
     request_overrides: dict | None = None,
     timeout_s: float = 120.0,
+    audit_model: str = "",
 ) -> AsyncGenerator[str, None]:
     """Yield raw SSE lines from the Grok app-chat endpoint."""
     proxy = await get_proxy_runtime()
@@ -413,6 +414,8 @@ async def _stream_chat(
         account_token=token,
         endpoint=CHAT,
         payload=payload,
+        public_model=audit_model,
+        upstream_model=audit_model,
     )
 
     headers = build_http_headers(
@@ -602,6 +605,7 @@ async def completions(
                             tool_overrides=tool_overrides,
                             request_overrides=request_overrides,
                             timeout_s=timeout_s,
+                            audit_model=model,
                         ):
                             event_type, data = classify_line(line)
                             if event_type == "done":
@@ -818,6 +822,7 @@ async def completions(
                     tool_overrides=tool_overrides,
                     request_overrides=request_overrides,
                     timeout_s=timeout_s,
+                    audit_model=model,
                 ):
                     event_type, data = classify_line(line)
                     if event_type == "done":

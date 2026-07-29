@@ -19,7 +19,7 @@ install_console()
 from DrissionPage import Chromium, ChromiumOptions
 
 from .cpa_queue import CpaExportQueue
-from .mail import MailboxPool, OutlookTokenError, VerificationCodeTimeout
+from .mail import MAILBOX_EXHAUSTED_EXIT_CODE, MailboxPool, MailboxUnavailableError, OutlookTokenError, VerificationCodeTimeout
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
@@ -114,7 +114,7 @@ class BrowserRegistration:
         result = self.mail_pool.preflight()
         print(f"[mail] Microsoft mailbox preflight completed: checked {result['checked']}, available {result['available']}, invalid {result['invalid']}, deferred {result['transient']}", flush=True)
         if result["checked"] and not result["available"] and not result["transient"]:
-            raise RuntimeError("No usable Microsoft mailbox credentials remain after preflight")
+            raise MailboxUnavailableError("No usable Microsoft mailbox credentials remain after preflight")
 
     def close(self) -> None:
         self._close_browser()
@@ -743,37 +743,49 @@ def main() -> int:
     count = int((config.get("run") or {}).get("count") or 1)
     if not 1 <= count <= 100:
         raise SystemExit("run.count 必须在 1 到 100 之间")
-    worker = BrowserRegistration(config)
+    worker: BrowserRegistration | None = None
     run_settings = config.get("run") or {}
     mailbox_attempts = int(run_settings.get("mailbox_attempts") or 5)
     code_timeout_sec = int(run_settings.get("code_timeout_sec") or 120)
     collected: list[dict[str, Any]] = []
+    exit_code = 0
     cpa_queue = CpaExportQueue(config)
     try:
-        worker.preflight_mailboxes()
-        worker.start()
-        for current in range(1, count + 1):
-            print(f"[run] 开始第 {current}/{count} 轮注册", flush=True)
-            try:
-                result = worker.run_one(
-                    mailbox_attempts=mailbox_attempts,
-                    code_timeout_sec=code_timeout_sec,
-                )
-                collected.append(result)
-                cpa_queue.submit(result, worker.page)
-                print(f"[run] 第 {current} 轮成功: {result['email']}", flush=True)
-            except Exception as exc:
-                print(f"[run] 第 {current} 轮失败: {type(exc).__name__}: {exc}", flush=True)
-            if current < count:
-                worker.restart()
+        try:
+            worker = BrowserRegistration(config)
+            worker.preflight_mailboxes()
+        except MailboxUnavailableError as exc:
+            print(f"[mail] \u65e0\u6cd5\u5206\u914d\u53ef\u7528\u90ae\u7bb1\uff0c\u505c\u6b62\u5f53\u524d\u6ce8\u518c\u4efb\u52a1: {exc}", flush=True)
+            exit_code = MAILBOX_EXHAUSTED_EXIT_CODE
+        else:
+            worker.start()
+            for current in range(1, count + 1):
+                print(f"[run] \u5f00\u59cb\u7b2c {current}/{count} \u8f6e\u6ce8\u518c", flush=True)
+                try:
+                    result = worker.run_one(
+                        mailbox_attempts=mailbox_attempts,
+                        code_timeout_sec=code_timeout_sec,
+                    )
+                    collected.append(result)
+                    cpa_queue.submit(result, worker.page)
+                    print(f"[run] \u7b2c {current} \u8f6e\u6210\u529f: {result['email']}", flush=True)
+                except MailboxUnavailableError as exc:
+                    print(f"[mail] \u65e0\u6cd5\u5206\u914d\u53ef\u7528\u90ae\u7bb1\uff0c\u505c\u6b62\u5f53\u524d\u6ce8\u518c\u4efb\u52a1: {exc}", flush=True)
+                    exit_code = MAILBOX_EXHAUSTED_EXIT_CODE
+                    break
+                except Exception as exc:
+                    print(f"[run] \u7b2c {current} \u8f6e\u5931\u8d25: {type(exc).__name__}: {exc}", flush=True)
+                if current < count:
+                    worker.restart()
     finally:
         try:
             cpa_queue.drain()
             import_registered_accounts(config, collected)
         finally:
-            worker.close()
+            if worker is not None:
+                worker.close()
     print(f"[run] 注册任务结束：成功 {len(collected)}/{count}", flush=True)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

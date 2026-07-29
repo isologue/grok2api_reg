@@ -29,6 +29,13 @@ class VerificationCodeTimeout(RuntimeError):
     """The current mailbox did not receive an xAI verification code in time."""
 
 
+MAILBOX_EXHAUSTED_EXIT_CODE = 75
+
+
+class MailboxUnavailableError(RuntimeError):
+    """No configured mailbox provider could allocate another address."""
+
+
 class MailboxRateLimited(RuntimeError):
     """A mailbox API asked the worker to stop polling for a short period."""
 
@@ -821,7 +828,7 @@ class MailboxPool:
                 return Mailbox(address=address, provider_index=index, provider_token=provider_token)
             except Exception as exc:
                 errors.append(f"{provider.name}: {exc}")
-        raise RuntimeError("All mailbox providers failed to allocate an address; " + "; ".join(errors))
+        raise MailboxUnavailableError("All mailbox providers failed to allocate an address; " + "; ".join(errors))
 
     @staticmethod
     def _inline_message_content(item: dict[str, Any]) -> str:
@@ -967,4 +974,4 @@ def extract_verification_code(content: str) -> str | None:
     return numeric.group(1) if numeric else None
 
 
-__all__ = ["Mailbox", "MailboxPool", "MailboxRateLimited", "OutlookTokenError", "OutlookTokenProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]
+__all__ = ["MAILBOX_EXHAUSTED_EXIT_CODE", "Mailbox", "MailboxPool", "MailboxRateLimited", "MailboxUnavailableError", "OutlookTokenError", "OutlookTokenProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]

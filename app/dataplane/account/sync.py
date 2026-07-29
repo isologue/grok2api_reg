@@ -12,8 +12,38 @@ from app.control.account.enums import AccountStatus
 from app.control.account.quota_defaults import normalize_quota_set
 from app.control.account.repository import AccountRepository
 from app.control.account.state_machine import derive_status
+from app.control.registration.archive import decrypt_profile
+from app.platform.logging.request_trace import (
+    remove_audit_account_label,
+    replace_audit_account_labels,
+    update_audit_account_label,
+)
 from ..shared.enums import POOL_STR_TO_ID, STATUS_STR_TO_ID, StatusId
 from .table import AccountRuntimeTable, make_empty_table
+
+
+def _audit_label(record: AccountRecord) -> str:
+    """Return a safe human-readable account identity for request audits.
+
+    Registration details are encrypted under ``ext``. They are decrypted only
+    while rebuilding the in-memory runtime label map; raw SSO/login secrets are
+    never written to audit records.
+    """
+    ext = record.ext if isinstance(record.ext, dict) else {}
+    profile = decrypt_profile(ext) or {}
+    oauth = profile.get("oauth") if isinstance(profile.get("oauth"), dict) else {}
+    for value in (
+        profile.get("email"),
+        oauth.get("email"),
+        profile.get("user_id"),
+        oauth.get("user_id"),
+        ext.get("email"),
+        ext.get("user_id"),
+    ):
+        label = str(value or "").strip()
+        if label:
+            return label
+    return ""
 
 
 def _record_to_slot_args(record: AccountRecord) -> dict:
@@ -93,6 +123,7 @@ async def bootstrap(repository: AccountRepository) -> AccountRuntimeTable:
     table = make_empty_table()
     # Cache tags per token for tag_idx.
     _tags_by_token: dict[str, list[str]] = {}
+    audit_labels: dict[str, str] = {}
 
     for record in snapshot.items:
         if record.is_deleted():
@@ -101,10 +132,13 @@ async def bootstrap(repository: AccountRepository) -> AccountRuntimeTable:
         tags = args.pop("tags")
         cooling_until_s = args.pop("cooling_until_s")
         _tags_by_token[record.token] = tags
+        if label := _audit_label(record):
+            audit_labels[record.token] = label
         idx = table._append_slot(record.token, **args, tags=tags)
         table.cooling_until_s_by_idx[idx] = cooling_until_s
 
     table.revision = snapshot.revision
+    replace_audit_account_labels(audit_labels)
     logger.info(
         "account runtime table bootstrapped: revision={} account_count={} pool_count={}",
         table.revision,
@@ -129,6 +163,7 @@ async def apply_changes(
         changeset = await repository.scan_changes(table.revision, limit=batch_limit)
 
         for token in changeset.deleted_tokens:
+            remove_audit_account_label(token)
             idx = table.idx_by_token.get(token)
             if idx is not None:
                 table._remove_from_indexes(idx)
@@ -140,6 +175,7 @@ async def apply_changes(
         for record in changeset.items:
             if record.is_deleted():
                 # Handle soft-delete from items list too.
+                remove_audit_account_label(record.token)
                 idx = table.idx_by_token.get(record.token)
                 if idx is not None:
                     table._remove_from_indexes(idx)
@@ -148,6 +184,7 @@ async def apply_changes(
                     changed = True
                 continue
 
+            update_audit_account_label(record.token, _audit_label(record))
             args = _record_to_slot_args(record)
             tags = args.pop("tags")
             cooling_until_s = args.pop("cooling_until_s")

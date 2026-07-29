@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI):
     # Browser registration is isolated in a supervised child process so its
     # DrissionPage/Chromium dependencies never block the API event loop.
     from app.control.registration import RegistrationManager
-    app.state.registration_manager = RegistrationManager()
+    app.state.registration_manager = RegistrationManager(repository=repo)
 
     # 3. Account directory sync loop — all workers, lightweight incremental pull.
     #    Keeps each worker's in-memory table eventually consistent with the repo.
