@@ -53,6 +53,12 @@ class CpaRetryRequest(BaseModel):
     email: str = Field(default="", max_length=512)
 
 
+class CpaBatchRetryRequest(BaseModel):
+    """Explicitly selected ordinary accounts for a serial CPA retry batch."""
+
+    tokens: list[str] = Field(min_length=1, max_length=100)
+
+
 class RegistrationCredentialsRequest(BaseModel):
     token: str = Field(min_length=1, max_length=8_192)
 
@@ -77,6 +83,30 @@ def _cpa_retry_runtime(request: Request) -> tuple[dict[str, dict[str, Any]], set
 
 def _manual_cpa_task_id() -> str:
     return "manual_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6]
+
+
+def _manual_cpa_batch_task_id() -> str:
+    return "batch_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6]
+
+
+def _cpa_batch_retry_runtime(request: Request) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Keep at most one serial bulk CPA retry queue per web process.
+
+    Exporting a saved archive may launch a browser and rotate SSO.  A batch is
+    therefore deliberately serial; it reuses the existing per-account retry
+    path instead of running multiple browser/OAuth flows concurrently.
+    """
+    app_state = request.app.state
+    tasks = getattr(app_state, "manual_cpa_batch_retry_tasks", None)
+    if tasks is None:
+        tasks = {}
+        app_state.manual_cpa_batch_retry_tasks = tasks
+    active_id = getattr(app_state, "manual_cpa_batch_retry_active_id", None)
+    return tasks, active_id
+
+
+def _set_active_cpa_batch_retry(request: Request, task_id: str | None) -> None:
+    request.app.state.manual_cpa_batch_retry_active_id = task_id
 
 
 def _classify_cpa_export_status(result: dict[str, Any]) -> str:
@@ -430,6 +460,153 @@ async def retry_cpa_auth_for_account(
 
     asyncio.create_task(_run(), name=f"manual-cpa-retry-{task_id}")
     return _retry_state_payload(task)
+
+
+def _batch_retry_state_payload(task: dict[str, Any]) -> dict[str, Any]:
+    """Return aggregate progress without exposing account or OAuth secrets."""
+    return {
+        key: task.get(key)
+        for key in (
+            "task_id", "state", "created_at", "started_at", "finished_at",
+            "total", "current_index", "succeeded", "failed", "skipped",
+            "cancel_requested", "message", "child_task_ids",
+        )
+    }
+
+
+@router.post("/cpa-auths/retry/batch")
+async def retry_cpa_auth_batch(
+    req: CpaBatchRetryRequest,
+    request: Request,
+    repo: AccountRepository = Depends(get_repo),
+):
+    """Queue selected accounts for serial CPA Auth retries.
+
+    The batch intentionally delegates each item to the established single
+    account retry.  This preserves SSO rotation, encrypted-profile browser
+    fallback, per-account CPA status persistence, task logs, and Build import.
+    A cancel request stops *new* items; an already running OAuth flow is allowed
+    to finish so its browser and token poller can clean up safely.
+    """
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in req.tokens:
+        token = str(raw or "").strip()
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    if not tokens:
+        raise HTTPException(400, "\u8bf7\u81f3\u5c11\u9009\u62e9\u4e00\u4e2a\u8d26\u53f7")
+
+    tasks, active_id = _cpa_batch_retry_runtime(request)
+    if active_id:
+        active = tasks.get(active_id)
+        if active and active.get("state") in {"queued", "running", "cancelling"}:
+            raise HTTPException(409, "\u5df2\u6709\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u4efb\u52a1\u5728\u8fd0\u884c")
+
+    task_id = _manual_cpa_batch_task_id()
+    task: dict[str, Any] = {
+        "task_id": task_id,
+        "state": "queued",
+        "created_at": datetime.now(UTC).isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "total": len(tokens),
+        "current_index": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+        "cancel_requested": False,
+        "message": "\u5df2\u52a0\u5165\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u961f\u5217",
+        "child_task_ids": [],
+    }
+    tasks[task_id] = task
+    _set_active_cpa_batch_retry(request, task_id)
+
+    async def _run() -> None:
+        individual_tasks, _, _ = _cpa_retry_runtime(request)
+        task["state"] = "running"
+        task["started_at"] = datetime.now(UTC).isoformat()
+        task["message"] = "\u6b63\u5728\u4e32\u884c\u5904\u7406 CPA \u5bfc\u51fa\u91cd\u8bd5"
+        try:
+            for index, token in enumerate(tokens, start=1):
+                if task["cancel_requested"]:
+                    task["skipped"] += len(tokens) - index + 1
+                    break
+                task["current_index"] = index
+                try:
+                    child = await retry_cpa_auth_for_account(
+                        CpaRetryRequest(token=token), request, repo
+                    )
+                except HTTPException as exc:
+                    if exc.status_code == 409:
+                        task["skipped"] += 1
+                    else:
+                        task["failed"] += 1
+                    continue
+                except Exception:  # noqa: BLE001
+                    task["failed"] += 1
+                    continue
+
+                child_task_id = str(child.get("task_id") or "")
+                if not child_task_id:
+                    task["failed"] += 1
+                    continue
+                task["child_task_ids"].append(child_task_id)
+                while True:
+                    await asyncio.sleep(1)
+                    child_state = individual_tasks.get(child_task_id)
+                    if child_state is None:
+                        task["failed"] += 1
+                        break
+                    state = str(child_state.get("state") or "")
+                    if state == "completed":
+                        task["succeeded"] += 1
+                        break
+                    if state == "failed":
+                        task["failed"] += 1
+                        break
+
+            if task["cancel_requested"]:
+                task["state"] = "cancelled"
+                task["message"] = "\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u5df2\u53d6\u6d88\uff0c\u672a\u5f00\u59cb\u7684\u8d26\u53f7\u5df2\u8df3\u8fc7"
+            else:
+                task["state"] = "completed"
+                task["message"] = "\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u5b8c\u6210"
+        except Exception:  # noqa: BLE001
+            task["state"] = "failed"
+            task["message"] = "\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u5f02\u5e38\u4e2d\u65ad"
+        finally:
+            task["finished_at"] = datetime.now(UTC).isoformat()
+            if getattr(request.app.state, "manual_cpa_batch_retry_active_id", None) == task_id:
+                _set_active_cpa_batch_retry(request, None)
+
+    asyncio.create_task(_run(), name=f"manual-cpa-batch-retry-{task_id}")
+    return _batch_retry_state_payload(task)
+
+
+@router.get("/cpa-auths/retry/batch/{batch_id}")
+async def get_cpa_batch_retry_status(batch_id: str, request: Request):
+    tasks, _ = _cpa_batch_retry_runtime(request)
+    task = tasks.get(batch_id)
+    if task is None:
+        raise HTTPException(404, "\u672a\u627e\u5230\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u4efb\u52a1")
+    return _batch_retry_state_payload(task)
+
+
+@router.post("/cpa-auths/retry/batch/{batch_id}/cancel")
+async def cancel_cpa_batch_retry(batch_id: str, request: Request):
+    tasks, _ = _cpa_batch_retry_runtime(request)
+    task = tasks.get(batch_id)
+    if task is None:
+        raise HTTPException(404, "\u672a\u627e\u5230\u6279\u91cf CPA \u5bfc\u51fa\u91cd\u8bd5\u4efb\u52a1")
+    if task.get("state") not in {"queued", "running", "cancelling"}:
+        return _batch_retry_state_payload(task)
+    task["cancel_requested"] = True
+    if task.get("state") == "queued":
+        task["state"] = "cancelling"
+    task["message"] = "\u5df2\u8bf7\u6c42\u53d6\u6d88\uff0c\u5f53\u524d\u8d26\u53f7\u5bfc\u51fa\u7ed3\u675f\u540e\u4e0d\u518d\u542f\u52a8\u540e\u7eed\u8d26\u53f7"
+    return _batch_retry_state_payload(task)
 
 
 @router.get("/cpa-auths/retry/{task_id}")
