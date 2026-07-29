@@ -143,6 +143,22 @@ def _registration_identity(ext: dict | None) -> tuple[str, str, bool]:
     return email, user_id, has_login_credentials
 
 
+_CPA_EXPORT_STATES = frozenset({"not_attempted", "success", "xai_denied", "retryable_failure"})
+
+
+def _cpa_export_metadata(ext: dict | None) -> tuple[str, str, str]:
+    """Return non-secret CPA export status saved alongside an account."""
+    value = (ext or {}).get("cpa_export") if isinstance(ext, dict) else None
+    if not isinstance(value, dict):
+        return "not_attempted", "", ""
+    status = str(value.get("status") or "not_attempted").strip().lower()
+    if status not in _CPA_EXPORT_STATES:
+        status = "retryable_failure"
+    updated_at = str(value.get("updated_at") or "").strip()[:64]
+    message = str(value.get("message") or "").strip()[:500]
+    return status, updated_at, message
+
+
 def _identity_key(value: object) -> str:
     return str(value or "").strip().casefold()
 
@@ -171,20 +187,32 @@ def _annotate_cpa_auth_status(payloads: list[dict]) -> list[dict]:
     for item in payloads:
         email = _identity_key(item.get("email"))
         user_id = _identity_key(item.get("user_id"))
-        item["has_cpa_auth"] = bool(
+        has_cpa_auth = bool(
             (email and email in build_emails)
             or (user_id and user_id in build_user_ids)
         )
+        item["has_cpa_auth"] = has_cpa_auth
+        item.setdefault("cpa_export_status", "not_attempted")
+        item.setdefault("cpa_export_updated_at", "")
+        item.setdefault("cpa_export_message", "")
+        # Build-pool presence is authoritative for the current successful export.
+        if has_cpa_auth:
+            item["cpa_export_status"] = "success"
     return payloads
 
 
 def _serialize_record(r) -> dict:
-    email, user_id, has_login_credentials = _registration_identity(r.ext if isinstance(r.ext, dict) else {})
+    ext = r.ext if isinstance(r.ext, dict) else {}
+    email, user_id, has_login_credentials = _registration_identity(ext)
+    cpa_export_status, cpa_export_updated_at, cpa_export_message = _cpa_export_metadata(ext)
     return {
         "token":       r.token,
         "email":       email,
         "user_id":     user_id,
         "has_login_credentials": has_login_credentials,
+        "cpa_export_status": cpa_export_status,
+        "cpa_export_updated_at": cpa_export_updated_at,
+        "cpa_export_message": cpa_export_message,
         "pool":        r.pool or "basic",
         "status":      r.status,
         "quota":       _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
@@ -253,7 +281,11 @@ async def _list_token_payloads(repo: "AccountRepository") -> list[dict]:
     # account page also needs safe derived fields (email/user ID/capability).
     # Rehydrate records server-side only; never put archive/password/SSO in
     # the response.
-    if payloads and not all("has_login_credentials" in item for item in payloads):
+    required_safe_fields = {
+        "email", "user_id", "has_login_credentials",
+        "cpa_export_status", "cpa_export_updated_at", "cpa_export_message",
+    }
+    if payloads and not all(required_safe_fields.issubset(item) for item in payloads):
         tokens = [str(item.get("token") or "") for item in payloads if item.get("token")]
         records = await repo.get_accounts(tokens)
         identities = {
@@ -267,10 +299,16 @@ async def _list_token_payloads(repo: "AccountRepository") -> list[dict]:
                 item.setdefault("email", "")
                 item.setdefault("user_id", "")
                 item.setdefault("has_login_credentials", False)
+                item.setdefault("cpa_export_status", "not_attempted")
+                item.setdefault("cpa_export_updated_at", "")
+                item.setdefault("cpa_export_message", "")
                 continue
             item["email"] = identity["email"]
             item["user_id"] = identity["user_id"]
             item["has_login_credentials"] = identity["has_login_credentials"]
+            item["cpa_export_status"] = identity["cpa_export_status"]
+            item["cpa_export_updated_at"] = identity["cpa_export_updated_at"]
+            item["cpa_export_message"] = identity["cpa_export_message"]
     return _annotate_cpa_auth_status(payloads)
 
 

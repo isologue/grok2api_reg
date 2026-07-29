@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, RootModel
 
-from app.control.account.commands import AccountUpsert
+from app.control.account.commands import AccountPatch, AccountUpsert
 from app.control.account.repository import AccountRepository
 from app.control.registration.archive import ARCHIVE_EXT_KEY, decrypt_profile, encrypt_profile
 from app.control.registration.cpa import (
@@ -77,6 +77,37 @@ def _cpa_retry_runtime(request: Request) -> tuple[dict[str, dict[str, Any]], set
 
 def _manual_cpa_task_id() -> str:
     return "manual_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6]
+
+
+def _classify_cpa_export_status(result: dict[str, Any]) -> str:
+    """Classify only the retry outcome; normal-account availability is unchanged."""
+    if bool(result.get("ok")) and result.get("path"):
+        return "success"
+    error = str(result.get("error") or result.get("reason") or "").casefold()
+    if "invalid_grant" in error and "access denied" in error:
+        return "xai_denied"
+    if "device auth failed: access_denied" in error:
+        return "xai_denied"
+    return "retryable_failure"
+
+
+async def _persist_cpa_export_status(
+    repo: AccountRepository,
+    *,
+    token: str,
+    task_id: str,
+    result: dict[str, Any],
+) -> None:
+    """Persist a compact, non-secret CPA outcome on the ordinary account row."""
+    status = _classify_cpa_export_status(result)
+    message = str(result.get("error") or result.get("reason") or "").strip()[:500]
+    payload = {
+        "status": status,
+        "updated_at": datetime.now(UTC).isoformat(),
+        "task_id": task_id,
+        "message": message,
+    }
+    await repo.patch_accounts([AccountPatch(token=token, ext_merge={"cpa_export": payload})])
 
 
 def _retry_state_payload(task: dict[str, Any]) -> dict[str, Any]:
@@ -303,6 +334,7 @@ async def retry_cpa_auth_for_account(
     active_tokens.add(token)
 
     async def _run() -> None:
+        status_token = token
         task["state"] = "running"
         task["started_at"] = datetime.now(UTC).isoformat()
         task["message"] = "\u6b63\u5728\u5bfc\u51fa CPA Auth"
@@ -325,6 +357,7 @@ async def retry_cpa_auth_for_account(
                 try:
                     rotated = await repo.rotate_account_token(token, refreshed_sso)
                     if rotated.upserted:
+                        status_token = refreshed_sso
                         task["sso_rotated"] = True
                         _append_cpa_task_log(task_id, "browser login obtained a new SSO; normal account pool record rotated")
                     else:
@@ -335,6 +368,15 @@ async def retry_cpa_auth_for_account(
                     _append_cpa_task_log(task_id, f"CPA Auth exported, but normal account SSO rotation failed: {type(exc).__name__}: {exc}")
 
             record_cpa_task_result(cpa, result)
+            try:
+                await _persist_cpa_export_status(
+                    repo, token=status_token, task_id=task_id, result=result
+                )
+            except Exception as exc:  # noqa: BLE001
+                _append_cpa_task_log(
+                    task_id,
+                    f"CPA export status persistence failed: {type(exc).__name__}: {exc}",
+                )
             if not result.get("ok"):
                 task["state"] = "failed"
                 task["message"] = str(result.get("error") or result.get("reason") or "CPA \u5bfc\u51fa\u5931\u8d25")[:500]
@@ -367,7 +409,17 @@ async def retry_cpa_auth_for_account(
             task["message"] = message
             _append_cpa_task_log(task_id, task["message"])
         except Exception as exc:  # noqa: BLE001
-            record_cpa_task_result(cpa, {"ok": False, "error": f"retry exception: {type(exc).__name__}: {exc}"})
+            failure_result = {"ok": False, "error": f"retry exception: {type(exc).__name__}: {exc}"}
+            record_cpa_task_result(cpa, failure_result)
+            try:
+                await _persist_cpa_export_status(
+                    repo, token=status_token, task_id=task_id, result=failure_result
+                )
+            except Exception as persist_exc:  # noqa: BLE001
+                _append_cpa_task_log(
+                    task_id,
+                    f"CPA export status persistence failed: {type(persist_exc).__name__}: {persist_exc}",
+                )
             task["state"] = "failed"
             task["message"] = f"CPA \u5bfc\u51fa\u5f02\u5e38\uff1a{type(exc).__name__}: {exc}"[:500]
             _append_cpa_task_log(task_id, task["message"])

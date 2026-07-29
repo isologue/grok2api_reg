@@ -1152,9 +1152,27 @@ def approve_device_code(
             _dismiss_cookie_banner(page, log)
             _sleep(0.4)
 
-        # Sign-in chooser
-        if "使用邮箱登录" in text or "Continue with email" in text:
-            if _click_exact(page, ["使用邮箱登录", "Continue with email", "Sign in with email"], log, real=False):
+        # Sign-in chooser. xAI currently renders this as "Login with email"
+        # on the account-management OAuth page (not "Continue with email").
+        if (
+            "Continue with email" in text
+            or "Login with email" in text
+            or "Log in with email" in text
+            or "Sign in with email" in text
+            or "使用邮箱登录" in text
+        ):
+            if _click_exact(
+                page,
+                [
+                    "Continue with email",
+                    "Login with email",
+                    "Log in with email",
+                    "Sign in with email",
+                    "使用邮箱登录",
+                ],
+                log,
+                real=False,
+            ):
                 _sleep(1.5)
                 phase = "email"
                 continue
@@ -1371,6 +1389,9 @@ def mint_with_browser(
         token_box: dict[str, Any] = {}
         err_box: dict[str, BaseException] = {}
 
+        def _poll_cancelled() -> bool:
+            return stop_event.is_set() or bool(cancel and cancel())
+
         def _poll() -> None:
             try:
                 time.sleep(2)
@@ -1379,7 +1400,7 @@ def mint_with_browser(
                     interval=max(sess.interval, 5),
                     expires_in=min(sess.expires_in, int(browser_timeout_sec) + 60),
                     log=log,
-                    cancel=cancel,
+                    cancel=_poll_cancelled,
                     proxy=resolved or None,
                 )
                 token_box["token"] = tr

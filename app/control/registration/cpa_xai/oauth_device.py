@@ -265,6 +265,18 @@ def poll_device_token(
     sleep_for = max(interval, 1)
     net_streak = 0
     max_net_streak = 20
+
+    def _sleep_or_cancel(seconds: float) -> None:
+        """Sleep in short slices so a failed browser flow cannot leave poll logs running."""
+        until = time.monotonic() + max(float(seconds), 0.0)
+        while True:
+            if cancel and cancel():
+                raise OAuthDeviceError("cancelled")
+            remain = until - time.monotonic()
+            if remain <= 0:
+                return
+            time.sleep(min(remain, 0.25))
+
     while time.time() < deadline:
         if cancel and cancel():
             raise OAuthDeviceError("cancelled")
@@ -295,7 +307,7 @@ def poll_device_token(
                 raise OAuthDeviceError(
                     f"device auth aborted after {net_streak} network errors: {e}"
                 ) from e
-            time.sleep(wait)
+            _sleep_or_cancel(wait)
             continue
         if status == 200 and isinstance(body, dict) and body.get("access_token"):
             access = str(body["access_token"]).strip()
@@ -319,7 +331,7 @@ def poll_device_token(
             if err == "slow_down":
                 sleep_for = min(sleep_for + 5, 30)
             log(f"oauth poll: {err} (sleep {sleep_for}s)")
-            time.sleep(sleep_for)
+            _sleep_or_cancel(sleep_for)
             continue
         if err in ("expired_token", "access_denied"):
             raise OAuthDeviceError(f"device auth failed: {err}: {desc}")
@@ -334,8 +346,8 @@ def poll_device_token(
                 raise OAuthDeviceError(
                     f"device auth aborted after soft HTTP failures status={status}"
                 )
-            time.sleep(wait)
+            _sleep_or_cancel(wait)
             continue
         log(f"oauth poll unexpected HTTP {status}: {body!r}")
-        time.sleep(sleep_for)
+        _sleep_or_cancel(sleep_for)
     raise OAuthDeviceError("device auth timed out waiting for user approval")

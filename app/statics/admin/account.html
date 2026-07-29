@@ -989,6 +989,7 @@
           <th style="min-width:180px">邮箱 / 用户 ID</th>
           <th class="table-center" style="width:92px">账号密码</th>
            <th class="table-center" style="width:118px">&#26159;&#21542;&#23548;&#20986; CPA Auth</th>
+           <th class="table-center" style="width:112px">CPA &#23548;&#20986;&#29366;&#24577;</th>
           <th class="table-center" style="width:70px" data-i18n="account.colType">类型</th>
           <th class="table-center" style="width:70px" data-i18n="account.colStatus">状态</th>
           <th data-quota-only>
@@ -1697,13 +1698,30 @@ function renderTable(view = getTokenView()) {
 
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(rowHtml).join('')
-    : `<tr><td colspan="13" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
+    : `<tr><td colspan="14" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
   $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
   $('section-table-count', total);
   const prev = document.getElementById('btn-prev'), next = document.getElementById('btn-next');
   prev.disabled = curPage <= 1; next.disabled = curPage >= pages;
   updateBatchBtns();
+}
+
+function cpaExportStatusBadge(t) {
+  const status = String(t.cpa_export_status || 'not_attempted');
+  const labels = {
+    success: ['badge-active', '\u5bfc\u51fa\u6210\u529f'],
+    xai_denied: ['badge-failed', 'xAI \u62d2\u7edd'],
+    retryable_failure: ['badge-cooling', '\u53ef\u91cd\u8bd5\u5931\u8d25'],
+    not_attempted: ['badge-basic', '\u672a\u5c1d\u8bd5'],
+  };
+  const [klass, label] = labels[status] || labels.retryable_failure;
+  const detail = [
+    t.cpa_export_updated_at ? `\u66f4\u65b0\uff1a${fmtDate(t.cpa_export_updated_at)}` : '',
+    t.cpa_export_message || '',
+  ].filter(Boolean).join('\n');
+  const title = detail ? ` title="${xe(detail)}"` : '';
+  return `<span class="badge ${klass}"${title}>${label}</span>`;
 }
 
 function rowHtml(t) {
@@ -1744,6 +1762,7 @@ function rowHtml(t) {
       </td>
       <td class="table-center">${t.has_login_credentials ? `<button type="button" class="pagi-btn" onclick="viewRegistrationCredentials('${xe(t.token)}')">是</button>` : '<span style="color:#9a9a9a">否</span>'}</td>
       <td class="table-center">${t.has_cpa_auth ? '<span class="badge badge-active">&#26159;</span>' : '<span style="color:#9a9a9a">&#21542;</span>'}</td>
+      <td class="table-center">${cpaExportStatusBadge(t)}</td>
       <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
     <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
