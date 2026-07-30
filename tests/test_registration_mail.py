@@ -148,6 +148,38 @@ class OutlookPreflightTests(unittest.TestCase):
             self.assertEqual(state["owner+c2api1@outlook.com"]["state"], "token_invalid")
         provider.close()
 
+    def test_runtime_refresh_failure_quarantines_every_alias_of_the_credential(self) -> None:
+        entry = {
+            "type": "outlook_token",
+            "mailboxes": "owner@outlook.com----password----client----refresh",
+            "alias_enabled": True,
+            "alias_per_email": 2,
+            "alias_prefix": "c2api",
+            "alias_include_original": True,
+        }
+        provider = OutlookTokenProvider(entry)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.control.registration.mail._outlook_state_path", return_value=Path(tmp) / "outlook.json"):
+            created = provider.create_mailbox()
+            provider.mark_result(
+                created["address"],
+                created["token"],
+                success=False,
+                reason="Microsoft token refresh failed: HTTP 400 (invalid_grant AADSTS70000)",
+            )
+            from app.control.registration import mail
+            state = mail._read_outlook_state()
+            self.assertEqual(
+                {item["state"] for item in state.values()},
+                {"token_invalid"},
+            )
+            self.assertEqual(
+                set(state),
+                {"owner@outlook.com", "owner+c2api1@outlook.com", "owner+c2api2@outlook.com"},
+            )
+            with self.assertRaisesRegex(RuntimeError, "no available mailbox"):
+                provider.create_mailbox()
+        provider.close()
+
     def test_preflight_defers_transient_oauth_failures_without_marking_invalid(self) -> None:
         entry = {"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "preflight_enabled": True}
         provider = OutlookTokenProvider(entry)

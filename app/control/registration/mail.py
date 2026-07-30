@@ -487,6 +487,35 @@ class OutlookTokenProvider(_MailboxProvider):
         self.message_limit = _outlook_int(entry.get("message_limit"), 10, 1, 100)
         self.preflight_enabled = _outlook_bool(entry.get("preflight_enabled"), True)
 
+    def _mark_credential_state(self, credential: dict[str, str], state_name: str, reason: str = "") -> int:
+        """Persist one Microsoft credential's state for its base address and aliases.
+
+        Every plus-alias shares the same Microsoft refresh token and inbox.  A
+        definitive refresh-token failure must therefore quarantine the entire
+        credential group instead of only the alias used by the current runner.
+        """
+        reason = str(reason or "")[:240]
+        timestamp = datetime.now(UTC).isoformat()
+        # Runtime mailbox tokens describe the selected alias.  Always expand
+        # from ``login_email`` (the credential owner) so the original address
+        # and every sibling alias are marked together.
+        base_email = str(
+            credential.get("login_email") or credential.get("alias_of") or credential.get("email") or ""
+        ).strip()
+        base_credential = {**credential, "email": base_email, "login_email": base_email}
+        addresses = {
+            str(item.get("email") or "").strip().lower()
+            for item in expand_outlook_aliases([base_credential], self._entry)
+        }
+        if not addresses:
+            return 0
+        with _OUTLOOK_STATE_LOCK:
+            state = _read_outlook_state()
+            for email in addresses:
+                state[email] = {"state": state_name, "reason": reason, "updated_at": timestamp}
+            _write_outlook_state(state)
+        return len(addresses)
+
     def preflight(self) -> dict[str, int]:
         """Validate each base Microsoft credential before a browser is started.
 
@@ -510,16 +539,13 @@ class OutlookTokenProvider(_MailboxProvider):
                     print(f"[mail] Microsoft mailbox preflight deferred: {credential['email']} ({type(exc).__name__}: {exc})", flush=True)
                     continue
                 reason = str(exc)[:240]
-                expanded = expand_outlook_aliases([credential], self._entry)
-                with _OUTLOOK_STATE_LOCK:
-                    state = _read_outlook_state()
-                    for item in expanded:
-                        email = str(item.get("email") or "").lower()
-                        if email:
-                            state[email] = {"state": "token_invalid", "reason": reason, "updated_at": datetime.now(UTC).isoformat()}
-                    _write_outlook_state(state)
+                marked = self._mark_credential_state(credential, "token_invalid", reason)
                 result["invalid"] += 1
-                print(f"[mail] Microsoft mailbox preflight invalid: {credential['email']} ({exc})", flush=True)
+                print(
+                    f"[\u90ae\u7bb1] Microsoft \u90ae\u7bb1\u9884\u68c0\u65e0\u6548\uff1a{credential['email']}\uff08{exc}\uff09\uff1b"
+                    f"\u5df2\u5c06 {marked} \u4e2a\u5173\u8054\u90ae\u7bb1\u6807\u8bb0\u4e3a\u51ed\u636e\u65e0\u6548",
+                    flush=True,
+                )
             except Exception as exc:
                 result["transient"] += 1
                 print(f"[mail] Microsoft mailbox preflight deferred: {credential['email']} ({type(exc).__name__}: {exc})", flush=True)
@@ -766,10 +792,23 @@ class OutlookTokenProvider(_MailboxProvider):
         reason = str(reason or "")[:240]
         try:
             credential = self._credentials(provider_token)
-            login_email = credential.get("login_email") or address
         except Exception:
-            login_email = address
-        state_name = "used" if success else ("token_invalid" if "Microsoft token refresh failed" in reason else "failed")
+            credential = None
+
+        # Do not burn an entire Microsoft credential for a registration-page
+        # rejection or an OTP timeout.  Only permanent refresh-token failures
+        # are shared by every alias and must be quarantined as one group.
+        token_invalid = not success and "microsoft token refresh failed" in reason.lower()
+        if token_invalid and credential is not None:
+            marked = self._mark_credential_state(credential, "token_invalid", reason)
+            print(
+                f"[\u90ae\u7bb1] Microsoft \u90ae\u7bb1\u51ed\u636e\u65e0\u6548\uff0c\u5df2\u5c06 {marked} \u4e2a\u5173\u8054\u90ae\u7bb1\u6807\u8bb0\u4e3a\u51ed\u636e\u65e0\u6548\uff0c"
+                "\u540e\u7eed\u6c34\u4f4d\u8865\u53f7\u5c06\u81ea\u52a8\u8df3\u8fc7",
+                flush=True,
+            )
+            return
+
+        state_name = "used" if success else "failed"
         with _OUTLOOK_STATE_LOCK:
             state = _read_outlook_state()
             state[address.lower()] = {"state": state_name, "reason": reason, "updated_at": datetime.now(UTC).isoformat()}

@@ -15,9 +15,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.control.account.enums import AccountStatus
 from app.control.account.repository import AccountRepository
-from app.control.account.state_machine import derive_status
+from app.control.account.quota_defaults import supported_mode_ids
+from app.control.account.state_machine import is_selectable
 from app.platform.paths import data_path, log_path
 from .cpa import finalize_cpa_task, initialize_cpa_task
 
@@ -475,16 +475,24 @@ class RegistrationManager:
         }
 
     async def _available_account_counts(self) -> dict[str, int]:
-        """Count accounts currently eligible for generic pool allocation.
+        """Count accounts that can actually accept at least one new request.
 
-        Ordinary accounts use the persisted lifecycle state (including elapsed
-        cooldowns). Build accounts must be enabled, out of cooldown, and have
-        at least one synchronized model before they count as available.
+        A normal account is not available merely because its persisted lifecycle
+        status is ``active``.  It must also have remaining quota in at least one
+        non-Build mode.  This deliberately excludes accounts in cooldown after
+        a 429 as well as active-looking accounts whose known quota windows are
+        all exhausted.  Build accounts use the same enabled/cooldown/model rule
+        as their runtime allocator.
         """
         snapshot = await self._repository.runtime_snapshot()
         normal = sum(
-            1 for record in snapshot.items
-            if not record.is_deleted() and derive_status(record) == AccountStatus.ACTIVE
+            1
+            for record in snapshot.items
+            if not record.is_deleted()
+            and any(
+                is_selectable(record, mode_id)
+                for mode_id in supported_mode_ids(record.pool)
+            )
         )
         from app.control.build.accounts import _now_ms, store as build_store
 
