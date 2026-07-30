@@ -535,6 +535,15 @@ const SCHEMA_DEF = [
         ]
       },
       {
+        title: '重试策略', titleKey: 'config.schema.groups.retry',
+        section: 'retry',
+        fields: [
+          { key: 'max_retries', label: '失败后最多更换账号数', type: 'number', min: 0, desc: '单次请求失败后，最多再尝试多少个不同账号。0 表示不更换账号；保存后对下一个请求立即生效。' },
+          { key: 'on_codes', label: '应用层换账号触发状态码', type: 'text', desc: '收到指定 HTTP 状态码时更换账号重试，多个值使用英文逗号分隔。默认包含 429,401,403,503。' },
+          { key: 'reset_session_status_codes', label: '传输层会话重建状态码', labelKey: 'config.schema.fields.resetSessionCodes.label', type: 'text', desc: '收到指定 HTTP 状态码时自动重建传输层代理会话（Transport Session），多个值请使用英文逗号分隔。', descKey: 'config.schema.fields.resetSessionCodes.desc' },
+        ]
+      },
+      {
         title: '选号并发限制', titleKey: 'config.schema.groups.selection',
         section: 'account.selection',
         fields: [
@@ -716,16 +725,7 @@ const SCHEMA_DEF = [
           },
         ]
       },
-      {
-        title: '重试策略', titleKey: 'config.schema.groups.retry',
-        section: 'retry',
-        fields: [
-          { key: 'max_retries', label: '失败后最多更换账号数', type: 'number', min: 0, max: 20, desc: '单次请求失败后，最多再尝试多少个不同账号。0 表示不更换账号；保存后对下一个请求立即生效。' },
-          { key: 'on_codes', label: '应用层换账号触发状态码', type: 'text', desc: '收到指定 HTTP 状态码时更换账号重试，多个值使用英文逗号分隔。默认包含 429,401,403,503。' },
-          { key: 'reset_session_status_codes', label: '传输层会话重建状态码', labelKey: 'config.schema.fields.resetSessionCodes.label', type: 'text', desc: '收到指定 HTTP 状态码时自动重建传输层代理会话（Transport Session），多个值请使用英文逗号分隔。', descKey: 'config.schema.fields.resetSessionCodes.desc' },
-        ]
-      },
-      {
+{
         title: '请求超时设置', titleKey: 'config.schema.groups.timeouts',
         section: 'chat',
         fields: [

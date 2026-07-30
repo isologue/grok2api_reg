@@ -6,8 +6,6 @@ from app.control.account.runtime import get_refresh_service
 from app.dataplane.account.selector import current_strategy
 from app.platform.config.snapshot import get_config
 
-_MAX_ACCOUNT_SWITCHES = 20
-
 
 def selection_max_retries() -> int:
     """Return the configured maximum number of replacement accounts per request.
@@ -20,7 +18,10 @@ def selection_max_retries() -> int:
         configured = int(get_config("retry.max_retries", 1))
     except (TypeError, ValueError):
         configured = 1
-    return min(max(0, configured), _MAX_ACCOUNT_SWITCHES)
+    # Do not impose a hidden code-level ceiling: operators control this value
+    # from the live retry.max_retries setting. Negative or malformed values
+    # still safely mean "do not switch accounts".
+    return max(0, configured)
 
 
 def mode_candidates(spec: ModelSpec) -> tuple[int, ...]:

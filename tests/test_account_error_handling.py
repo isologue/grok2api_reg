@@ -4,9 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.control.account.backends.local import LocalAccountRepository
-from app.control.account.commands import AccountUpsert
+from app.control.account.commands import AccountPatch, AccountUpsert
 from app.control.account.enums import AccountStatus, FeedbackKind
-from app.control.account.refresh import AccountRefreshService
+from app.control.account.refresh import AccountRefreshService, reconcile_legacy_rate_limited_accounts
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.account.models import AccountRecord
 from app.control.account.state_machine import AccountFeedback, StatePolicy, apply_feedback
@@ -97,6 +97,54 @@ class AccountFailurePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.status, AccountStatus.EXPIRED)
         self.assertEqual(record.last_fail_reason, "unauthorized")
 
+    async def test_429_is_persisted_as_rate_limited_cooling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalAccountRepository(Path(tmp) / "accounts.db")
+            await repo.initialize()
+            await repo.upsert_accounts([AccountUpsert(token="test-token")])
+            service = AccountRefreshService(repo)
+            await service.record_failure_async(
+                "test-token", 0, UpstreamError("usage limit", status=429)
+            )
+            record = next(iter(await repo.get_accounts(["test-token"])))
+
+        self.assertEqual(record.status, AccountStatus.COOLING)
+        self.assertEqual(record.last_fail_reason, "rate_limited")
+        self.assertEqual(record.state_reason, "rate_limited")
+        self.assertGreater(record.ext.get("cooldown_until", 0), 0)
+        self.assertEqual(record.ext.get("cooldown_reason"), "rate_limited")
+
+    async def test_legacy_recent_429_is_backfilled_to_cooling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalAccountRepository(Path(tmp) / "accounts.db")
+            await repo.initialize()
+            await repo.upsert_accounts([AccountUpsert(token="test-token")])
+            service = AccountRefreshService(repo)
+            with patch("app.control.account.refresh.now_ms", return_value=1_000_000):
+                await service.record_failure_async(
+                    "test-token", 0, UpstreamError("usage limit", status=429)
+                )
+
+            # Simulate the incomplete state persisted by the previous release:
+            # quota/failure metadata exists, but lifecycle cooling fields do not.
+            await repo.patch_accounts([
+                AccountPatch(token="test-token", clear_failures=True),
+                AccountPatch(
+                    token="test-token",
+                    last_fail_at=1_000_000,
+                    last_fail_reason="rate_limited",
+                ),
+            ])
+
+            with patch("app.control.account.refresh.now_ms", return_value=1_001_000):
+                repaired = await reconcile_legacy_rate_limited_accounts(repo)
+            record = next(iter(await repo.get_accounts(["test-token"])))
+
+        self.assertEqual(repaired, 1)
+        self.assertEqual(record.status, AccountStatus.COOLING)
+        self.assertEqual(record.state_reason, "rate_limited")
+        self.assertGreater(record.ext.get("cooldown_until", 0), 1_001_000)
+
 class RetryConfigurationTests(unittest.TestCase):
     def test_switch_limit_uses_live_config_and_is_clamped(self):
         with patch(
@@ -110,7 +158,7 @@ class RetryConfigurationTests(unittest.TestCase):
         with patch(
             "app.products._account_selection.get_config", return_value=999
         ):
-            self.assertEqual(selection_max_retries(), 20)
+            self.assertEqual(selection_max_retries(), 999)
 
     def test_default_and_admin_schema_expose_live_switch_limit(self):
         defaults = (_ROOT / "config.defaults.toml").read_text(encoding="utf-8")
@@ -123,6 +171,11 @@ class RetryConfigurationTests(unittest.TestCase):
         self.assertIn("key: 'max_retries'", admin_html)
         self.assertIn("section: 'account.error'", admin_html)
         self.assertIn("forbidden_cooling_sec", admin_html)
+        schedule_start = admin_html.index("id: 'schedule'")
+        schedule_end = admin_html.index("id: 'cache'", schedule_start)
+        retry_group = admin_html.index("section: 'retry'")
+        self.assertGreater(retry_group, schedule_start)
+        self.assertLess(retry_group, schedule_end)
 
 
 if __name__ == "__main__":

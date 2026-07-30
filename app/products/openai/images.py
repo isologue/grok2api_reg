@@ -1075,8 +1075,25 @@ async def _stream_image_chat_request(
                     remaining = trace_limit - trace_chars
                     response_lines.append(text_line[:remaining])
                     trace_chars += min(len(text_line), remaining)
+
+                # xAI can return a transport-level 200 while embedding quota or
+                # service errors inside an SSE data frame. Detect them before
+                # yielding so the trace is completed as 429/5xx, not as 200.
+                event_type, data = classify_line(line)
+                if event_type == "data" and data:
+                    raise_for_stream_error(data)
                 yield line
             completed = True
+        except UpstreamError as error:
+            stream_failed = True
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=CHAT,
+                error=error,
+                status=error.status,
+            )
+            raise
         except Exception as exc:
             stream_failed = True
             error = UpstreamError(f"{operation} stream read failed: {exc}", status=502)

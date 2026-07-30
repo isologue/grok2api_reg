@@ -114,28 +114,77 @@ def classify_line(line: str | bytes) -> tuple[str, str]:
     return "skip", ""
 
 
-def stream_error_from_payload(obj: dict[str, Any]) -> UpstreamError | None:
-    """Convert upstream in-band stream error payloads to retryable errors."""
-    error = obj.get("error")
-    if not isinstance(error, dict):
-        return None
-
-    raw_message = error.get("message") or error.get("error") or "Upstream stream error"
-    message = str(raw_message)
-    code = error.get("code")
-    text = message.lower()
-    status = 429 if code == 8 or "too many requests" in text or "rate limit" in text else 502
-
+def _make_stream_error(obj: dict[str, Any], message: str, *, status: int) -> UpstreamError:
     try:
         body = orjson.dumps(obj).decode()
     except (TypeError, ValueError):
         body = str(obj)
-
     return UpstreamError(
         f"Upstream stream error: {message}",
         status=status,
         body=body[:400],
     )
+
+
+def _nested_stream_error(obj: dict[str, Any]) -> UpstreamError | None:
+    """Extract model-response stream errors embedded below ``result.response``.
+
+    Image generation commonly completes its card with no URL and then puts the
+    actual reason in ``modelResponse.streamErrors`` / ``metadata.stream_errors``.
+    Surface it here so callers can return a useful 429/5xx instead of claiming
+    that no image was generated.
+    """
+    pending: list[dict[str, Any]] = [obj]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in visited:
+            continue
+        visited.add(marker)
+
+        for field in ("streamErrors", "stream_errors"):
+            raw = current.get(field)
+            entries = raw if isinstance(raw, list) else [raw]
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                message = str(item.get("message") or item.get("error") or "").strip()
+                if not message:
+                    continue
+                text = message.lower()
+                rate_limited = (
+                    "usageLimitReached" in item
+                    or "usage_limit_reached" in item
+                    or "usage limit" in text
+                    or "rate limit" in text
+                )
+                service_unavailable = (
+                    "sampling_load_shed" in str(item).lower()
+                    or "service temporarily unavailable" in text
+                    or "try again later" in text
+                )
+                status = 429 if rate_limited else 503 if service_unavailable else 502
+                return _make_stream_error(obj, message, status=status)
+
+        for key in ("result", "response", "modelResponse", "metadata"):
+            child = current.get(key)
+            if isinstance(child, dict):
+                pending.append(child)
+    return None
+
+
+def stream_error_from_payload(obj: dict[str, Any]) -> UpstreamError | None:
+    """Convert upstream in-band stream errors to retryable errors."""
+    error = obj.get("error")
+    if isinstance(error, dict):
+        raw_message = error.get("message") or error.get("error") or "Upstream stream error"
+        message = str(raw_message)
+        code = error.get("code")
+        text = message.lower()
+        status = 429 if code == 8 or "too many requests" in text or "rate limit" in text else 502
+        return _make_stream_error(obj, message, status=status)
+    return _nested_stream_error(obj)
 
 
 def raise_for_stream_error(data: str | bytes | dict[str, Any]) -> None:

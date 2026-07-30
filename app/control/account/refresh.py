@@ -55,6 +55,22 @@ _MODE_KEYS = {
 }
 
 
+def _rate_limit_cooling_sec(pool: str, mode_id: int) -> int:
+    """Return the persisted cooldown for a 429, aligned with runtime selection."""
+    if mode_id == 5:
+        return 14_400
+    config_key, fallback = {
+        "basic": ("account.refresh.basic_interval_sec", 86_400),
+        "super": ("account.refresh.super_interval_sec", 7_200),
+        "heavy": ("account.refresh.heavy_interval_sec", 7_200),
+    }.get(pool, ("account.refresh.basic_interval_sec", 86_400))
+    try:
+        return min(max(1, int(get_config(config_key, fallback))), 604_800)
+    except (TypeError, ValueError):
+        return fallback
+
+
+
 def _infer_pool_from_live_windows(windows: dict[int, QuotaWindow]) -> str | None:
     """Infer pool only from quota totals that identify an entitlement tier."""
     auto_win = windows.get(0)
@@ -72,6 +88,51 @@ def _infer_pool_from_live_windows(windows: dict[int, QuotaWindow]) -> str | None
         if win.total == 50:
             return "super"
     return None
+
+
+async def reconcile_legacy_rate_limited_accounts(repository: "AccountRepository") -> int:
+    """Backfill cooling state for recent 429 records written by older releases.
+
+    Older request paths persisted ``last_fail_reason=rate_limited`` and quota=0
+    but left the lifecycle status as ``active``. Repair only records whose last
+    failure is still inside the same pool cooldown window and which have not
+    subsequently recorded a successful call.
+    """
+    from .commands import AccountPatch
+
+    now = now_ms()
+    snapshot = await repository.runtime_snapshot()
+    patches: list[AccountPatch] = []
+    for record in snapshot.items:
+        last_fail_at = record.last_fail_at
+        if (
+            record.is_deleted()
+            or record.status != AccountStatus.ACTIVE
+            or record.last_fail_reason != "rate_limited"
+            or not last_fail_at
+            or (record.last_use_at is not None and record.last_use_at > last_fail_at)
+        ):
+            continue
+        cooldown_until = last_fail_at + _rate_limit_cooling_sec(record.pool, 0) * 1000
+        if now >= cooldown_until:
+            continue
+        patches.append(
+            AccountPatch(
+                token=record.token,
+                status=AccountStatus.COOLING,
+                state_reason="rate_limited",
+                ext_merge={
+                    **dict(record.ext or {}),
+                    "cooldown_until": cooldown_until,
+                    "cooldown_reason": "rate_limited",
+                },
+            )
+        )
+
+    if not patches:
+        return 0
+    result = await repository.patch_accounts(patches)
+    return result.patched
 
 
 class AccountRefreshService:
@@ -482,7 +543,17 @@ class AccountRefreshService:
                     now = now_ms()
                     quota_patch: dict[str, dict] = {}
                     window = record.quota_set().get(mode_id)
-                    extra_patch: dict = {}
+                    cooldown_until = now + _rate_limit_cooling_sec(record.pool, mode_id) * 1000
+                    ext_data = dict(record.ext or {})
+                    extra_patch: dict = {
+                        "status": AccountStatus.COOLING,
+                        "state_reason": "rate_limited",
+                        "ext_merge": {
+                            **ext_data,
+                            "cooldown_until": cooldown_until,
+                            "cooldown_reason": "rate_limited",
+                        },
+                    }
                     if window is not None:
                         if mode_id == 5:
                             # Console 429: 一次直接清零（扣 20），账号当前窗口不再可用
@@ -502,7 +573,6 @@ class AccountRefreshService:
                             # Console 专属 429 计数器（独立于 usage_fail_count，
                             # 避免被 500/网络超时等其他失败干扰）。
                             # 12 小时滑动窗口：距离上次 429 超过 12 小时 → 计数重置为 0
-                            ext_data = record.ext or {}
                             last_429_at = int(ext_data.get("console_429_last_at", 0))
                             sliding_window_ms = 12 * 3600 * 1000
                             if last_429_at > 0 and (now - last_429_at) > sliding_window_ms:
@@ -511,7 +581,7 @@ class AccountRefreshService:
                                 console_429_count = int(ext_data.get("console_429_count", 0))
                             new_429_count = console_429_count + 1
                             ext_merge: dict = {
-                                **ext_data,
+                                **extra_patch["ext_merge"],
                                 "console_429_count": new_429_count,
                                 "console_429_last_at": now,
                             }
@@ -553,6 +623,12 @@ class AccountRefreshService:
                                 **quota_patch,
                             )
                         ]
+                    )
+                    logger.info(
+                        "account cooled after 429: token={}... mode_id={} until={}",
+                        token[:10],
+                        mode_id,
+                        (extra_patch.get("ext_merge") or {}).get("cooldown_until"),
                     )
                     return
             await self._repo.patch_accounts(
@@ -720,4 +796,4 @@ class AccountRefreshService:
         return count
 
 
-__all__ = ["AccountRefreshService", "RefreshResult"]
+__all__ = ["AccountRefreshService", "RefreshResult", "reconcile_legacy_rate_limited_accounts"]

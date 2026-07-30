@@ -148,6 +148,18 @@ async def lifespan(app: FastAPI):
     await _config.load()
     await reconcile_local_media_cache_async()
 
+    # Repair recent 429 records created before rate-limit cooling was persisted.
+    # This runs before the in-memory directory is bootstrapped, so the admin UI
+    # and account selector see the repaired state immediately after startup.
+    from app.control.account.refresh import reconcile_legacy_rate_limited_accounts
+
+    reconciled_rate_limits = await reconcile_legacy_rate_limited_accounts(repo)
+    if reconciled_rate_limits:
+        logger.info(
+            "startup reconciled legacy rate-limited accounts into cooling: count={}",
+            reconciled_rate_limits,
+        )
+
     directory = await get_account_directory(repo)
 
     # Expose repository on app.state for admin handlers.
