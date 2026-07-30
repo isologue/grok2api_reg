@@ -508,6 +508,26 @@ class RegistrationManager:
     def _append_waterline_line(self, message: str) -> None:
         self._lines.append(f"[waterline] {message}")
 
+    def _release_outlook_busy_mailboxes(self) -> int:
+        """Release reservations left by a terminated registration child process."""
+        from .mail import reset_outlook_pool_state
+
+        return reset_outlook_pool_state("busy")
+
+    def reconcile_orphaned_outlook_busy_mailboxes(self) -> int:
+        """Clear reservations persisted by a runner that cannot survive this API start."""
+        return self._release_outlook_busy_mailboxes()
+
+    def _record_outlook_busy_release(self, released: int, log_file: Path | None = None) -> None:
+        if released <= 0:
+            return
+        message = f"[\u90ae\u7bb1] \u6ce8\u518c\u5b50\u4efb\u52a1\u5df2\u7ed3\u675f\uff0c\u5df2\u91ca\u653e {released} \u4e2a Microsoft \u90ae\u7bb1\u5360\u7528\u72b6\u6001"
+        self._lines.append(message)
+        if log_file is not None:
+            with contextlib.suppress(OSError):
+                with log_file.open("a", encoding="utf-8") as handle:
+                    handle.write(f"{_now()} | {message}\n")
+
     async def _wait_for_waterline_wake(self, seconds: int) -> None:
         if self._waterline_wake.is_set():
             self._waterline_wake.clear()
@@ -701,6 +721,8 @@ class RegistrationManager:
                     state=str(self._runtime.get("state") or "completed"),
                     finished_at=str(self._runtime.get("finished_at") or _now()),
                 )
+            with contextlib.suppress(Exception):
+                self._record_outlook_busy_release(self._release_outlook_busy_mailboxes(), log_file)
             if self._process is process:
                 self._process = None
             if self._watch_task is asyncio.current_task():
@@ -725,6 +747,8 @@ class RegistrationManager:
                 except TimeoutError:
                     process.kill()
                     await process.wait()
+            released = self._release_outlook_busy_mailboxes()
+            self._record_outlook_busy_release(released)
             self._runtime.update({
                 "state": "cancelled", "finished_at": _now(),
                 "exit_code": process.returncode if process is not None else None,

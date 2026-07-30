@@ -180,6 +180,27 @@ class OutlookPreflightTests(unittest.TestCase):
                 provider.create_mailbox()
         provider.close()
 
+    def test_preflight_skips_a_credential_already_marked_invalid(self) -> None:
+        entry = {
+            "type": "outlook_token",
+            "mailboxes": "owner@outlook.com----password----client----refresh",
+            "alias_enabled": True,
+            "alias_per_email": 1,
+            "preflight_enabled": True,
+        }
+        provider = OutlookTokenProvider(entry)
+        provider.list_messages = Mock()
+        with tempfile.TemporaryDirectory() as tmp, patch("app.control.registration.mail._outlook_state_path", return_value=Path(tmp) / "outlook.json"):
+            from app.control.registration import mail
+            mail._write_outlook_state({
+                "owner@outlook.com": {"state": "token_invalid"},
+                "owner+c2api1@outlook.com": {"state": "token_invalid"},
+            })
+            outcome = provider.preflight()
+            self.assertEqual(outcome, {"checked": 1, "available": 0, "invalid": 1, "transient": 0})
+            provider.list_messages.assert_not_called()
+        provider.close()
+
     def test_preflight_defers_transient_oauth_failures_without_marking_invalid(self) -> None:
         entry = {"type": "outlook_token", "mailboxes": "owner@outlook.com----password----client----refresh", "preflight_enabled": True}
         provider = OutlookTokenProvider(entry)

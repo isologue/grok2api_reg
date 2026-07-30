@@ -158,6 +158,9 @@ async def lifespan(app: FastAPI):
     # DrissionPage/Chromium dependencies never block the API event loop.
     from app.control.registration import RegistrationManager
     app.state.registration_manager = RegistrationManager(repository=repo)
+    released_mailboxes = app.state.registration_manager.reconcile_orphaned_outlook_busy_mailboxes()
+    if released_mailboxes:
+        logger.info("registration startup released orphaned Microsoft mailbox reservations: count={}", released_mailboxes)
 
     # 3. Account directory sync loop — all workers, lightweight incremental pull.
     #    Keeps each worker's in-memory table eventually consistent with the repo.

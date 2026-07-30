@@ -516,6 +516,22 @@ class OutlookTokenProvider(_MailboxProvider):
             _write_outlook_state(state)
         return len(addresses)
 
+    def _credential_is_quarantined(self, credential: dict[str, str]) -> bool:
+        """Return whether this base credential was already confirmed unusable."""
+        addresses = {
+            str(item.get("email") or "").strip().lower()
+            for item in expand_outlook_aliases([credential], self._entry)
+        }
+        if not addresses:
+            return False
+        with _OUTLOOK_STATE_LOCK:
+            state = _read_outlook_state()
+        return any(
+            str((state.get(email) or {}).get("state") or "")
+            in {"token_invalid", "login_required"}
+            for email in addresses
+        )
+
     def preflight(self) -> dict[str, int]:
         """Validate each base Microsoft credential before a browser is started.
 
@@ -526,8 +542,17 @@ class OutlookTokenProvider(_MailboxProvider):
         result = {"checked": 0, "available": 0, "invalid": 0, "transient": 0}
         if not self.preflight_enabled:
             return result
+        skipped_quarantined = 0
         for credential in self._base_credentials:
             result["checked"] += 1
+            # An earlier preflight or runtime refresh failure already proved this
+            # base credential unusable.  All aliases share that refresh token,
+            # so do not burn token requests and repeat the same failure on every
+            # waterline child run. The explicit pool reset action re-enables it.
+            if self._credential_is_quarantined(credential):
+                result["invalid"] += 1
+                skipped_quarantined += 1
+                continue
             context = json.dumps(credential, separators=(",", ":"))
             try:
                 # list_messages follows the configured Graph/IMAP/auto mode and
@@ -563,6 +588,12 @@ class OutlookTokenProvider(_MailboxProvider):
                             changed = True
                     if changed:
                         _write_outlook_state(state)
+        if skipped_quarantined:
+            print(
+                f"[\u90ae\u7bb1] \u5df2\u8df3\u8fc7 {skipped_quarantined} \u4e2a\u5df2\u6807\u8bb0\u5931\u6548\u7684 Microsoft \u51ed\u636e\uff0c"
+                "\u5982\u9700\u91cd\u65b0\u68c0\u6d4b\u8bf7\u5148\u70b9\u51fb\u201c\u6e05\u9664\u5f02\u5e38\u6807\u8bb0\u201d",
+                flush=True,
+            )
         return result
 
     def create_mailbox(self) -> dict[str, str]:
