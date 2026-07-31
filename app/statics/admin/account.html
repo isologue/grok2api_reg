@@ -280,7 +280,7 @@
       position:absolute;
       top:calc(100% + 10px);
       right:0;
-      width:min(416px, calc(100vw - 24px));
+      width:min(500px, calc(100vw - 24px));
       padding:12px;
       border-radius:16px;
       background:#FAF9F5;
@@ -318,8 +318,8 @@
       display:none;
     }
     .toolbar-dropdown-panel .filter-label {
-      width:34px;
-      flex:0 0 34px;
+      width:66px;
+      flex:0 0 66px;
       padding-top:6px;
       text-align:left;
     }
@@ -342,8 +342,8 @@
         width:min(320px, calc(100vw - 20px));
       }
       .toolbar-dropdown-panel .filter-label {
-        width:32px;
-        flex:0 0 32px;
+        width:62px;
+        flex:0 0 62px;
       }
     }
 
@@ -942,6 +942,32 @@
                 </button>
               </div>
             </div>
+            <div class="filter-group">
+              <span class="filter-label" data-i18n="account.filterCredentialsLabel">&#36134;&#21495;&#23494;&#30721;</span>
+              <div class="filter-chip-list">
+                <button type="button" class="filter-chip active" data-credentials="all" onclick="switchCredentials('all')"><span data-i18n="account.filterStatusAll">&#20840;&#37096;</span><span class="filter-chip-count" id="fc-credentials-all">0</span></button>
+                <button type="button" class="filter-chip" data-credentials="yes" onclick="switchCredentials('yes')"><span data-i18n="account.filterCredentialsYes">&#26377;</span><span class="filter-chip-count is-green" id="fc-credentials-yes">0</span></button>
+                <button type="button" class="filter-chip" data-credentials="no" onclick="switchCredentials('no')"><span data-i18n="account.filterCredentialsNo">&#26080;</span><span class="filter-chip-count" id="fc-credentials-no">0</span></button>
+              </div>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label" data-i18n="account.filterCpaAuthLabel">CPA Auth</span>
+              <div class="filter-chip-list">
+                <button type="button" class="filter-chip active" data-cpa-auth="all" onclick="switchCpaAuth('all')"><span data-i18n="account.filterStatusAll">&#20840;&#37096;</span><span class="filter-chip-count" id="fc-cpa-auth-all">0</span></button>
+                <button type="button" class="filter-chip" data-cpa-auth="yes" onclick="switchCpaAuth('yes')"><span data-i18n="account.filterCpaAuthYes">&#26159;</span><span class="filter-chip-count is-green" id="fc-cpa-auth-yes">0</span></button>
+                <button type="button" class="filter-chip" data-cpa-auth="no" onclick="switchCpaAuth('no')"><span data-i18n="account.filterCpaAuthNo">&#21542;</span><span class="filter-chip-count" id="fc-cpa-auth-no">0</span></button>
+              </div>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label" data-i18n="account.filterCpaExportStatusLabel">&#23548;&#20986;&#29366;&#24577;</span>
+              <div class="filter-chip-list">
+                <button type="button" class="filter-chip active" data-cpa-export-status="all" onclick="switchCpaExportStatus('all')"><span data-i18n="account.filterStatusAll">&#20840;&#37096;</span><span class="filter-chip-count" id="fc-cpa-export-status-all">0</span></button>
+                <button type="button" class="filter-chip" data-cpa-export-status="success" onclick="switchCpaExportStatus('success')"><span data-i18n="account.filterCpaExportSuccess">&#23548;&#20986;&#25104;&#21151;</span><span class="filter-chip-count is-green" id="fc-cpa-export-status-success">0</span></button>
+                <button type="button" class="filter-chip" data-cpa-export-status="xai_denied" onclick="switchCpaExportStatus('xai_denied')"><span data-i18n="account.filterCpaExportDenied">xAI &#25298;&#32477;</span><span class="filter-chip-count is-red" id="fc-cpa-export-status-xai-denied">0</span></button>
+                <button type="button" class="filter-chip" data-cpa-export-status="retryable_failure" onclick="switchCpaExportStatus('retryable_failure')"><span data-i18n="account.filterCpaExportRetryableFailure">&#21487;&#37325;&#35797;&#22833;&#36133;</span><span class="filter-chip-count is-orange" id="fc-cpa-export-status-retryable-failure">0</span></button>
+                <button type="button" class="filter-chip" data-cpa-export-status="not_attempted" onclick="switchCpaExportStatus('not_attempted')"><span data-i18n="account.filterCpaExportNotAttempted">&#26410;&#23581;&#35797;</span><span class="filter-chip-count" id="fc-cpa-export-status-not-attempted">0</span></button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1039,6 +1065,7 @@
       <div class="page-actions">
         <label class="page-action-btn" style="cursor:pointer"><input id="build-import-file" type="file" accept=".json,.zip" hidden><span data-build-text="import"></span></label>
         <button type="button" class="page-action-btn" id="build-batch-verify" onclick="batchVerifyBuildAccounts()" disabled data-build-text="verifySelected"></button>
+        <button type="button" class="page-action-btn" id="build-batch-delete" onclick="batchDeleteBuildAccounts()" disabled data-build-text="deleteSelected"></button>
         <button type="button" class="page-action-btn" onclick="loadBuildAccounts()" data-build-text="refresh"></button>
       </div>
     </div>
@@ -1226,7 +1253,7 @@
 const PAGE_SIZE_KEY = 'admin.account.page_size';
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000];
 
-let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curPage = 1, pageSize = loadSavedPageSize();
+let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curCredentials = 'all', curCpaAuth = 'all', curCpaExportStatus = 'all', curPage = 1, pageSize = loadSavedPageSize();
 const sel = new Set();
 const refreshingTokens = new Set();
 const cpaRetryingTokens = new Set();
@@ -1308,12 +1335,12 @@ const BUILD_ACCOUNT_PAGE_SIZE_KEY = 'admin.build_accounts.page_size';
 const BUILD_ACCOUNT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000, 2000];
 let buildAccountPageSize = Number(localStorage.getItem(BUILD_ACCOUNT_PAGE_SIZE_KEY)) || 50;
 const BUILD_TEXT = {
-  pool: 'Grok Build \u8d26\u53f7\u6c60', import: '\u5bfc\u5165 CPA Auth', verifySelected: '\u91cd\u65b0\u9a8c\u8bc1\u9009\u4e2d\u8d26\u53f7', refresh: '\u5237\u65b0',
+  pool: 'Grok Build \u8d26\u53f7\u6c60', import: '\u5bfc\u5165 CPA Auth', verifySelected: '\u91cd\u65b0\u9a8c\u8bc1\u9009\u4e2d\u8d26\u53f7', deleteSelected: '\u5220\u9664\u9009\u4e2d\u8d26\u53f7', refresh: '\u5237\u65b0',
   help: '\u8d26\u53f7\u4e0e\u666e\u901a\u8d26\u53f7\u6c60\u9694\u79bb\u3002429 \u4f1a\u663e\u793a\u89e3\u9650\u5012\u8ba1\u65f6\uff1bOAuth \u5237\u65b0\u4ee4\u724c\u5931\u6548\u4f1a\u81ea\u52a8\u505c\u6b62\u8c03\u5ea6\uff0c\u53ef\u901a\u8fc7\u201c\u91cd\u65b0\u9a8c\u8bc1\u201d\u6062\u590d\u3002',
   searchPlaceholder: '\u641c\u7d22\u90ae\u7bb1\u3001\u7528\u6237 ID\u3001\u6a21\u578b\u6216\u9519\u8bef\u4fe1\u606f', allStatus: '\u5168\u90e8\u72b6\u6001', active: '\u6b63\u5e38', cooling: '\u9650\u6d41 / \u51b7\u5374\u4e2d', disabled: 'OAuth \u5df2\u5931\u6548 / \u7981\u7528', manualDisabled: '\u5df2\u505c\u7528', query: '\u67e5\u8be2', clear: '\u6e05\u7a7a', close: '\u5173\u95ed',
   emailUser: '\u90ae\u7bb1 / \u7528\u6237 ID', status: '\u72b6\u6001', reason: '\u539f\u56e0 / \u89e3\u9650\u65f6\u95f4', successCalls: '\u6210\u529f\u8c03\u7528', failureCalls: '\u5931\u8d25\u8c03\u7528', models: '\u5df2\u540c\u6b65\u6a21\u578b', tokenExpiry: 'Token \u8fc7\u671f', lastOauthRefresh: '\u6700\u8fd1 OAuth \u5237\u65b0', lastError: '\u6700\u8fd1\u9519\u8bef', actions: '\u64cd\u4f5c', loading: '\u6b63\u5728\u52a0\u8f7d Grok Build \u8d26\u53f7\u6c60',
   enabled: '\u5df2\u542f\u7528', notSynced: '\u672a\u540c\u6b65', sync: '\u540c\u6b65\u6a21\u578b', verify: '\u91cd\u65b0\u9a8c\u8bc1', disable: '\u505c\u7528', enable: '\u542f\u7528', delete: '\u5220\u9664', emptyAccounts: '\u6682\u65e0 Grok Build \u8d26\u53f7', loadFailed: 'Build \u8d26\u53f7\u6c60\u52a0\u8f7d\u5931\u8d25\uff1a', syncOk: 'Build \u6a21\u578b\u540c\u6b65\u5b8c\u6210', syncFailed: '\u540c\u6b65\u5931\u8d25\uff1a', verifyOk: 'Build \u8d26\u53f7\u91cd\u65b0\u9a8c\u8bc1\u5b8c\u6210', verifyFailed: '\u91cd\u65b0\u9a8c\u8bc1\u5931\u8d25\uff1a', batchVerifyResult: '\u6279\u91cf\u91cd\u65b0\u9a8c\u8bc1\u5b8c\u6210\uff1a\u6210\u529f {ok}\uff0c\u5931\u8d25 {failed}', toggleFailed: '\u66f4\u65b0\u8d26\u53f7\u72b6\u6001\u5931\u8d25\uff1a', confirmDelete: '\u786e\u5b9a\u5220\u9664\u6b64 Grok Build \u8d26\u53f7\u5417\uff1f', deleteFailed: '\u5220\u9664\u5931\u8d25\uff1a', importOk: 'CPA Auth \u5bfc\u5165\u5b8c\u6210\uff1a\u65b0\u589e', updated: '\u66f4\u65b0', skipped: '\u8df3\u8fc7', importFailed: 'CPA Auth \u5bfc\u5165\u5931\u8d25\uff1a', page: '\u7b2c', pageOf: '/', pageSuffix: '\u9875',
-  selected: '\u5df2\u9009\u62e9 {n} \u4e2a\u8d26\u53f7', noneSelected: '\u672a\u9009\u62e9\u8d26\u53f7', unknown: '\u672a\u77e5', rateLimited: '\u4e0a\u6e38\u9650\u6d41', transient: '\u4e34\u65f6\u4e0a\u6e38\u9519\u8bef', refreshTokenInvalid: 'OAuth Refresh Token \u5df2\u5931\u6548', refreshFailed: 'OAuth \u5237\u65b0\u5931\u8d25', authorizationRejected: '\u5237\u65b0\u540e\u4ecd\u88ab\u4e0a\u6e38\u62d2\u7edd', remaining: '\u5269\u4f59 {time}', days: '\u5929', hours: '\u5c0f\u65f6', minutes: '\u5206', seconds: '\u79d2',
+  selected: '\u5df2\u9009\u62e9 {n} \u4e2a\u8d26\u53f7', noneSelected: '\u672a\u9009\u62e9\u8d26\u53f7', confirmBatchDelete: '\u786e\u5b9a\u5220\u9664\u5df2\u9009\u4e2d\u7684 {n} \u4e2a Grok Build \u8d26\u53f7\u5417\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002', batchDeleteOk: '\u6279\u91cf\u5220\u9664\u5b8c\u6210\uff1a\u5df2\u5220\u9664 {n} \u4e2a\u8d26\u53f7', unknown: '\u672a\u77e5', rateLimited: '\u4e0a\u6e38\u9650\u6d41', transient: '\u4e34\u65f6\u4e0a\u6e38\u9519\u8bef', refreshTokenInvalid: 'OAuth Refresh Token \u5df2\u5931\u6548', refreshFailed: 'OAuth \u5237\u65b0\u5931\u8d25', authorizationRejected: '\u5237\u65b0\u540e\u4ecd\u88ab\u4e0a\u6e38\u62d2\u7edd', remaining: '\u5269\u4f59 {time}', days: '\u5929', hours: '\u5c0f\u65f6', minutes: '\u5206', seconds: '\u79d2',
   detailTitle: 'Build \u8d26\u53f7\u72b6\u6001\u8be6\u60c5', detailLoading: '\u6b63\u5728\u52a0\u8f7d\u2026', detailLoadFailed: '\u52a0\u8f7d\u72b6\u6001\u8be6\u60c5\u5931\u8d25\uff1a', email: '\u90ae\u7bb1', userId: '\u7528\u6237 ID', runtimeStatus: '\u8fd0\u884c\u72b6\u6001', stateReason: '\u72b6\u6001\u539f\u56e0', schedulable: '\u662f\u5426\u53c2\u4e0e\u8c03\u5ea6', yes: '\u662f', no: '\u5426', cooldownUntil: '\u9650\u6d41/\u51b7\u5374\u622a\u6b62', remainingCooldown: '\u5269\u4f59\u89e3\u9650\u65f6\u95f4', lastStatus: '\u6700\u8fd1\u4e0a\u6e38\u72b6\u6001\u7801', lastRefresh: '\u6700\u8fd1 OAuth \u5237\u65b0', lastRefreshError: '\u6700\u8fd1 OAuth \u5237\u65b0\u9519\u8bef', syncedModels: '\u5df2\u540c\u6b65\u6a21\u578b', success: '\u6210\u529f\u8c03\u7528', failure: '\u5931\u8d25\u8c03\u7528'
 };
 const _html = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1350,10 +1377,12 @@ function buildStatusDescription(item) {
 function updateBuildSelectionUi() {
   const selected = selectedBuildAccountIds.size;
   const info = document.getElementById('build-selected-info');
-  const button = document.getElementById('build-batch-verify');
+  const verifyButton = document.getElementById('build-batch-verify');
+  const deleteButton = document.getElementById('build-batch-delete');
   const all = document.getElementById('build-cb-all');
   if (info) info.textContent = selected ? BUILD_TEXT.selected.replace('{n}', String(selected)) : BUILD_TEXT.noneSelected;
-  if (button) button.disabled = !selected;
+  if (verifyButton) verifyButton.disabled = !selected;
+  if (deleteButton) deleteButton.disabled = !selected;
   if (all) { const visible = buildAccounts.map(item => item.id); all.checked = visible.length > 0 && visible.every(id => selectedBuildAccountIds.has(id)); all.indeterminate = !all.checked && visible.some(id => selectedBuildAccountIds.has(id)); }
 }
 function toggleBuildAccountSelected(id, checked) { if (checked) selectedBuildAccountIds.add(id); else selectedBuildAccountIds.delete(id); updateBuildSelectionUi(); }
@@ -1461,6 +1490,7 @@ async function showBuildAccountDetails(id) {
 async function syncBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/sync`); showToast(BUILD_TEXT.syncOk, 'success'); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.syncFailed}${error.message}`, 'error'); } }
 async function verifyBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/verify`); showToast(BUILD_TEXT.verifyOk, 'success'); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.verifyFailed}${error.message}`, 'error'); await loadBuildAccounts(); } }
 async function batchVerifyBuildAccounts() { const ids = [...selectedBuildAccountIds]; if (!ids.length) return; try { const result = await _api('POST', '/build/accounts/verify', { ids }); showToast(BUILD_TEXT.batchVerifyResult.replace('{ok}', Number(result.succeeded || 0)).replace('{failed}', Number(result.failed || 0)), Number(result.failed || 0) ? 'warning' : 'success'); selectedBuildAccountIds.clear(); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.verifyFailed}${error.message}`, 'error'); } }
+async function batchDeleteBuildAccounts() { const ids = [...selectedBuildAccountIds]; if (!ids.length) return; if (!confirm(BUILD_TEXT.confirmBatchDelete.replace('{n}', String(ids.length)))) return; try { const result = await _api('DELETE', '/build/accounts', { ids }); selectedBuildAccountIds.clear(); showToast(BUILD_TEXT.batchDeleteOk.replace('{n}', String(Number(result.deleted || 0))), 'success'); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.deleteFailed}${error.message}`, 'error'); } }
 async function toggleBuildAccount(id, enabled) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/toggle`, { enabled }); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.toggleFailed}${error.message}`, 'error'); } }
 async function deleteBuildAccount(id) { if (!confirm(BUILD_TEXT.confirmDelete)) return; try { await _api('DELETE', '/build/accounts', { ids: [id] }); selectedBuildAccountIds.delete(id); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.deleteFailed}${error.message}`, 'error'); } }
 async function importBuildCpa(file) {
@@ -1560,7 +1590,7 @@ function render() {
 }
 
 function getTokenView() {
-  const cacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}`;
+  const cacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curCredentials}|${curCpaAuth}|${curCpaExportStatus}`;
   if (_tokenViewCache && _tokenViewCacheKey === cacheKey) return _tokenViewCache;
 
   const stats = {
@@ -1579,6 +1609,9 @@ function getTokenView() {
   };
   const statusCounts = { all: 0, active: 0, cooling: 0, invalid: 0, disabled: 0 };
   const nsfwCounts = { all: 0, enabled: 0, disabled: 0 };
+  const credentialsCounts = { all: 0, yes: 0, no: 0 };
+  const cpaAuthCounts = { all: 0, yes: 0, no: 0 };
+  const cpaExportStatusCounts = { all: 0, success: 0, xai_denied: 0, retryable_failure: 0, not_attempted: 0 };
   const poolCounts = new Map([['all', 0]]);
   const poolsSet = new Set(['basic', 'super', 'heavy']);
   const filteredItems = [];
@@ -1593,6 +1626,12 @@ function getTokenView() {
     const matchesStatus = curStatus === 'all'
       || (curStatus === 'invalid' ? invalid : curStatus === 'disabled' ? disabled : token.status === curStatus);
     const matchesNsfw = curNsfw === 'all' || (curNsfw === 'enabled' ? nsfwEnabled : !nsfwEnabled);
+    const hasCredentials = Boolean(token.has_login_credentials);
+    const hasCpaAuth = Boolean(token.has_cpa_auth);
+    const cpaExportStatus = normalizeCpaExportStatus(token.cpa_export_status);
+    const matchesCredentials = curCredentials === 'all' || (curCredentials === 'yes' ? hasCredentials : !hasCredentials);
+    const matchesCpaAuth = curCpaAuth === 'all' || (curCpaAuth === 'yes' ? hasCpaAuth : !hasCpaAuth);
+    const matchesCpaExportStatus = curCpaExportStatus === 'all' || cpaExportStatus === curCpaExportStatus;
 
     poolsSet.add(pool);
     const successCount = token.use_count || 0;
@@ -1611,7 +1650,7 @@ function getTokenView() {
     if (invalid) stats.invalid += 1;
     if (disabled) stats.disabled += 1;
 
-    if (matchesPool && matchesNsfw) {
+    if (matchesPool && matchesNsfw && matchesCredentials && matchesCpaAuth && matchesCpaExportStatus) {
       statusCounts.all += 1;
       if (token.status === 'active') statusCounts.active += 1;
       if (token.status === 'cooling') statusCounts.cooling += 1;
@@ -1619,18 +1658,35 @@ function getTokenView() {
       if (disabled) statusCounts.disabled += 1;
     }
 
-    if (matchesPool && matchesStatus) {
+    if (matchesPool && matchesStatus && matchesCredentials && matchesCpaAuth && matchesCpaExportStatus) {
       nsfwCounts.all += 1;
       if (nsfwEnabled) nsfwCounts.enabled += 1;
       else nsfwCounts.disabled += 1;
     }
 
-    if (matchesStatus && matchesNsfw) {
+    if (matchesStatus && matchesNsfw && matchesCredentials && matchesCpaAuth && matchesCpaExportStatus) {
       poolCounts.set('all', poolCounts.get('all') + 1);
       poolCounts.set(pool, (poolCounts.get(pool) || 0) + 1);
     }
 
-    if (matchesPool && matchesStatus && matchesNsfw) filteredItems.push(token);
+    if (matchesPool && matchesStatus && matchesNsfw && matchesCpaAuth && matchesCpaExportStatus) {
+      credentialsCounts.all += 1;
+      if (hasCredentials) credentialsCounts.yes += 1;
+      else credentialsCounts.no += 1;
+    }
+
+    if (matchesPool && matchesStatus && matchesNsfw && matchesCredentials && matchesCpaExportStatus) {
+      cpaAuthCounts.all += 1;
+      if (hasCpaAuth) cpaAuthCounts.yes += 1;
+      else cpaAuthCounts.no += 1;
+    }
+
+    if (matchesPool && matchesStatus && matchesNsfw && matchesCredentials && matchesCpaAuth) {
+      cpaExportStatusCounts.all += 1;
+      cpaExportStatusCounts[cpaExportStatus] += 1;
+    }
+
+    if (matchesPool && matchesStatus && matchesNsfw && matchesCredentials && matchesCpaAuth && matchesCpaExportStatus) filteredItems.push(token);
   }
 
   if (curPool !== 'all' && !poolsSet.has(curPool)) {
@@ -1638,11 +1694,14 @@ function getTokenView() {
     return getTokenView();
   }
 
-  _tokenViewCacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}`;
+  _tokenViewCacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curCredentials}|${curCpaAuth}|${curCpaExportStatus}`;
   _tokenViewCache = {
     stats,
     statusCounts,
     nsfwCounts,
+    credentialsCounts,
+    cpaAuthCounts,
+    cpaExportStatusCounts,
     poolCounts,
     pools: Array.from(poolsSet),
     filteredItems,
@@ -1656,6 +1715,11 @@ function poolLabel(pool) {
 
 function isDisabledStatus(status) {
   return status === 'disabled';
+}
+
+function normalizeCpaExportStatus(status) {
+  const value = String(status || 'not_attempted');
+  return ['success', 'xai_denied', 'retryable_failure', 'not_attempted'].includes(value) ? value : 'retryable_failure';
 }
 
 function isInvalidStatus(status) {
@@ -1683,6 +1747,9 @@ function renderFilters(view = getTokenView()) {
   renderStatusFilters(view);
   renderNsfwFilters(view);
   renderPoolFilters(view);
+  renderCredentialsFilters(view);
+  renderCpaAuthFilters(view);
+  renderCpaExportStatusFilters(view);
   syncFilterTrigger();
 }
 
@@ -1722,7 +1789,7 @@ function syncFilterTrigger() {
   const menu = document.getElementById('filter-menu');
   const trigger = document.getElementById('btn-filter');
   if (!menu || !trigger) return;
-  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || menu.classList.contains('open');
+  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || curCredentials !== 'all' || curCpaAuth !== 'all' || curCpaExportStatus !== 'all' || menu.classList.contains('open');
   trigger.classList.toggle('is-active', active);
 }
 
@@ -1740,6 +1807,29 @@ function renderNsfwFilters(view = getTokenView()) {
   setFilterCount('fc-nsfw-enabled', view.nsfwCounts.enabled);
   setFilterCount('fc-nsfw-disabled', view.nsfwCounts.disabled);
   document.querySelectorAll('[data-nsfw]').forEach(el => el.classList.toggle('active', el.dataset.nsfw === curNsfw));
+}
+
+function renderCredentialsFilters(view = getTokenView()) {
+  setFilterCount('fc-credentials-all', view.credentialsCounts.all);
+  setFilterCount('fc-credentials-yes', view.credentialsCounts.yes);
+  setFilterCount('fc-credentials-no', view.credentialsCounts.no);
+  document.querySelectorAll('[data-credentials]').forEach(el => el.classList.toggle('active', el.dataset.credentials === curCredentials));
+}
+
+function renderCpaAuthFilters(view = getTokenView()) {
+  setFilterCount('fc-cpa-auth-all', view.cpaAuthCounts.all);
+  setFilterCount('fc-cpa-auth-yes', view.cpaAuthCounts.yes);
+  setFilterCount('fc-cpa-auth-no', view.cpaAuthCounts.no);
+  document.querySelectorAll('[data-cpa-auth]').forEach(el => el.classList.toggle('active', el.dataset.cpaAuth === curCpaAuth));
+}
+
+function renderCpaExportStatusFilters(view = getTokenView()) {
+  setFilterCount('fc-cpa-export-status-all', view.cpaExportStatusCounts.all);
+  setFilterCount('fc-cpa-export-status-success', view.cpaExportStatusCounts.success);
+  setFilterCount('fc-cpa-export-status-xai-denied', view.cpaExportStatusCounts.xai_denied);
+  setFilterCount('fc-cpa-export-status-retryable-failure', view.cpaExportStatusCounts.retryable_failure);
+  setFilterCount('fc-cpa-export-status-not-attempted', view.cpaExportStatusCounts.not_attempted);
+  document.querySelectorAll('[data-cpa-export-status]').forEach(el => el.classList.toggle('active', el.dataset.cpaExportStatus === curCpaExportStatus));
 }
 
 function renderPoolFilters(view = getTokenView()) {
@@ -1778,6 +1868,21 @@ function applyNsfwFilter(items, mode = curNsfw) {
   return items.filter(t => !(t.tags || []).includes('nsfw'));
 }
 
+function applyCredentialsFilter(items, mode = curCredentials) {
+  if (mode === 'all') return items;
+  return items.filter(t => mode === 'yes' ? Boolean(t.has_login_credentials) : !t.has_login_credentials);
+}
+
+function applyCpaAuthFilter(items, mode = curCpaAuth) {
+  if (mode === 'all') return items;
+  return items.filter(t => mode === 'yes' ? Boolean(t.has_cpa_auth) : !t.has_cpa_auth);
+}
+
+function applyCpaExportStatusFilter(items, status = curCpaExportStatus) {
+  if (status === 'all') return items;
+  return items.filter(t => normalizeCpaExportStatus(t.cpa_export_status) === status);
+}
+
 function filtered() {
   return getTokenView().filteredItems;
 }
@@ -1807,7 +1912,7 @@ function renderTable(view = getTokenView()) {
 }
 
 function cpaExportStatusBadge(t) {
-  const status = String(t.cpa_export_status || 'not_attempted');
+  const status = normalizeCpaExportStatus(t.cpa_export_status);
   const labels = {
     success: ['badge-active', '\u5bfc\u51fa\u6210\u529f'],
     xai_denied: ['badge-failed', 'xAI \u62d2\u7edd'],
@@ -1934,6 +2039,33 @@ function switchNsfw(mode) {
 function switchPool(pool) {
   preserveScroll(() => {
     curPool = pool || 'all';
+    curPage = 1;
+    sel.clear();
+    renderFilters();
+    renderTable();
+  });
+}
+function switchCredentials(mode) {
+  preserveScroll(() => {
+    curCredentials = ['yes', 'no'].includes(mode) ? mode : 'all';
+    curPage = 1;
+    sel.clear();
+    renderFilters();
+    renderTable();
+  });
+}
+function switchCpaAuth(mode) {
+  preserveScroll(() => {
+    curCpaAuth = ['yes', 'no'].includes(mode) ? mode : 'all';
+    curPage = 1;
+    sel.clear();
+    renderFilters();
+    renderTable();
+  });
+}
+function switchCpaExportStatus(status) {
+  preserveScroll(() => {
+    curCpaExportStatus = ['success', 'xai_denied', 'retryable_failure', 'not_attempted'].includes(status) ? status : 'all';
     curPage = 1;
     sel.clear();
     renderFilters();
@@ -2174,7 +2306,7 @@ function doExport() {
 }
 
 function currentFilterSuffix() {
-  return [curStatus, curNsfw, curPool].filter(Boolean).join('-');
+  return [curStatus, curNsfw, curPool, curCredentials, curCpaAuth, curCpaExportStatus].filter(Boolean).join('-');
 }
 
 function _download(content, filename, mime) {

@@ -15,9 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.control.account.enums import AccountStatus
 from app.control.account.repository import AccountRepository
-from app.control.account.quota_defaults import supported_mode_ids
-from app.control.account.state_machine import is_selectable
 from app.platform.paths import data_path, log_path
 from .cpa import finalize_cpa_task, initialize_cpa_task
 
@@ -475,33 +474,26 @@ class RegistrationManager:
         }
 
     async def _available_account_counts(self) -> dict[str, int]:
-        """Count accounts that can actually accept at least one new request.
+        """Count only accounts whose displayed runtime status is normal.
 
-        A normal account is not available merely because its persisted lifecycle
-        status is ``active``.  It must also have remaining quota in at least one
-        non-Build mode.  This deliberately excludes accounts in cooldown after
-        a 429 as well as active-looking accounts whose known quota windows are
-        all exhausted.  Build accounts use the same enabled/cooldown/model rule
-        as their runtime allocator.
+        Waterline registration is inventory based rather than request-capacity
+        based: quota exhaustion does not reduce the normal pool count, while
+        cooldown/rate-limit, invalid and disabled records do.  Build records use
+        their public effective ``status`` so an expired cooldown is recovered by
+        the Build store before this count is calculated.
         """
         snapshot = await self._repository.runtime_snapshot()
         normal = sum(
             1
             for record in snapshot.items
-            if not record.is_deleted()
-            and any(
-                is_selectable(record, mode_id)
-                for mode_id in supported_mode_ids(record.pool)
-            )
+            if not record.is_deleted() and record.status == AccountStatus.ACTIVE
         )
-        from app.control.build.accounts import _now_ms, store as build_store
+        from app.control.build.accounts import BUILD_STATUS_ACTIVE, store as build_store
 
-        now = _now_ms()
         build = sum(
-            1 for row in build_store.list()
-            if bool(row.get("enabled"))
-            and int(row.get("cooldown_until") or 0) <= now
-            and bool(row.get("models"))
+            1
+            for row in build_store.list()
+            if str(row.get("status") or "") == BUILD_STATUS_ACTIVE
         )
         return {"normal_available": normal, "build_available": build}
 
