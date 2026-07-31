@@ -15,6 +15,7 @@ import asyncio
 import os
 import platform
 import sys
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.control.account.cleanup import run_daily_deleted_account_cleanup
+from app.platform.logging.cleanup import run_daily_log_cleanup
 from app.platform.logging.logger import logger, setup_logging, reload_logging
 from app.platform.config.snapshot import config as _config
 from app.platform.errors import AppError
@@ -316,6 +318,42 @@ async def lifespan(app: FastAPI):
         name="deleted-account-cleanup",
     ) if is_leader else None
 
+    def _active_cpa_task_ids() -> set[str]:
+        active: set[str] = set()
+        manager = getattr(app.state, "registration_manager", None)
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                runtime = manager.status()
+                if runtime.get("state") in {"running", "polling"} and runtime.get("task_id"):
+                    active.add(str(runtime["task_id"]))
+        for attr in ("manual_cpa_retry_tasks", "manual_cpa_batch_retry_tasks"):
+            tasks = getattr(app.state, attr, {}) or {}
+            if isinstance(tasks, dict):
+                for task_id, task in tasks.items():
+                    if isinstance(task, dict) and task.get("state") in {"queued", "running", "polling"}:
+                        active.add(str(task_id))
+        active_id = getattr(app.state, "manual_cpa_batch_retry_active_id", None)
+        if active_id:
+            active.add(str(active_id))
+        return active
+
+    def _log_cleanup_settings() -> dict[str, object]:
+        return {
+            "run_at": _config.get_str("account.cleanup.run_at", "03:30"),
+            "request_audit_retention_days": max(
+                0, _config.get_int("logging.request_audit_retention_days", 7)
+            ),
+            "cpa_task_retention_days": max(
+                0, _config.get_int("logging.cpa_task_retention_days", 7)
+            ),
+            "active_cpa_task_ids": _active_cpa_task_ids(),
+        }
+
+    log_cleanup_task = asyncio.create_task(
+        run_daily_log_cleanup(_log_cleanup_settings),
+        name="persistent-log-cleanup",
+    ) if is_leader else None
+
     logger.info("application startup completed")
     yield
 
@@ -339,6 +377,12 @@ async def lifespan(app: FastAPI):
         deleted_cleanup_task.cancel()
         try:
             await deleted_cleanup_task
+        except asyncio.CancelledError:
+            pass
+    if log_cleanup_task is not None:
+        log_cleanup_task.cancel()
+        try:
+            await log_cleanup_task
         except asyncio.CancelledError:
             pass
     registration_manager = getattr(app.state, "registration_manager", None)

@@ -1096,9 +1096,9 @@
     <p class="page-sub" style="margin:0 0 12px">注册机自动导出和账号行内“重试 CPA 导出”任务都会在此保留结果，可点击查看日志。</p>
     <div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>开始时间</th><th>结果</th><th>操作</th></tr></thead><tbody id="cpa-task-tbody"><tr><td colspan="5" class="empty-row">正在加载 CPA 导出记录</td></tr></tbody></table></div>
     <div class="pagi" id="cpa-task-pagi">
-      <button type="button" class="pagi-btn" id="cpa-task-prev" onclick="changeCpaTaskPage(-1)" aria-label="Previous page">&#8249;</button>
-      <div class="pagi-meta"><span class="pagi-page" id="cpa-task-page-info">0 / 0</span><select class="toolbar-page-size" id="cpa-task-page-size" aria-label="CPA task page size"><option value="10">10 / &#39029;</option><option value="20">20 / &#39029;</option><option value="50">50 / &#39029;</option><option value="100">100 / &#39029;</option><option value="200">200 / &#39029;</option><option value="500">500 / &#39029;</option><option value="1000">1000 / &#39029;</option><option value="2000">2000 / &#39029;</option></select></div>
-      <button type="button" class="pagi-btn" id="cpa-task-next" onclick="changeCpaTaskPage(1)" aria-label="Next page">&#8250;</button>
+      <button type="button" class="pagi-btn" id="cpa-task-prev" onclick="changeCpaTaskPage(-1)" aria-label="&#19978;&#19968;&#39029;">&#8249;</button>
+      <div class="pagi-meta"><span class="pagi-page" id="cpa-task-page-info">&#31532; 0 / 0 &#39029;</span><select class="toolbar-page-size" id="cpa-task-page-size" aria-label="CPA &#20219;&#21153;&#27599;&#39029;&#25968;&#37327;"><option value="10">10 / &#39029;</option><option value="20">20 / &#39029;</option><option value="50">50 / &#39029;</option><option value="100">100 / &#39029;</option><option value="200">200 / &#39029;</option><option value="500">500 / &#39029;</option><option value="1000">1000 / &#39029;</option><option value="2000">2000 / &#39029;</option></select></div>
+      <button type="button" class="pagi-btn" id="cpa-task-next" onclick="changeCpaTaskPage(1)" aria-label="&#19979;&#19968;&#39029;">&#8250;</button>
     </div>
   </section>
 
@@ -1412,8 +1412,27 @@ function changeBuildAccountPage(delta) { const target = buildAccountPage + (Numb
 function setBuildAccountPageSize(value) { const size = Number(value); buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(size) ? size : 50; localStorage.setItem(BUILD_ACCOUNT_PAGE_SIZE_KEY, String(buildAccountPageSize)); buildAccountPage = 1; loadBuildAccounts(); }
 function setBuildAccountFilter() { buildAccountQuery = document.getElementById('build-account-query')?.value.trim() || ''; buildAccountStatus = document.getElementById('build-account-status')?.value || ''; buildAccountPage = 1; loadBuildAccounts(); }
 function clearBuildAccountFilter() { const query = document.getElementById('build-account-query'); const status = document.getElementById('build-account-status'); if (query) query.value = ''; if (status) status.value = ''; buildAccountQuery = ''; buildAccountStatus = ''; buildAccountPage = 1; loadBuildAccounts(); }
+const CPA_TASK_TEXT = {
+  page: '\u7b2c',
+  pageSuffix: '\u9875',
+  queued: '\u961f\u5217\u4e2d',
+  running: '\u8fd0\u884c\u4e2d',
+  completed: '\u5df2\u5b8c\u6210',
+  failed: '\u5931\u8d25',
+  legacy: '\u65e7\u6570\u636e',
+  exported: '\u5bfc\u51fa',
+  failures: '\u5931\u8d25',
+  json: 'JSON',
+  viewLog: '\u67e5\u770b\u65e5\u5fd7',
+  empty: '\u6682\u65e0 CPA \u5bfc\u51fa\u8bb0\u5f55',
+  loadingFailed: 'CPA \u5bfc\u51fa\u8bb0\u5f55\u52a0\u8f7d\u5931\u8d25\uff1a',
+  taskLogTitle: 'CPA \u5bfc\u51fa\u4efb\u52a1\u65e5\u5fd7',
+  noLog: '\u6682\u65e0\u53ef\u67e5\u770b\u7684\u4efb\u52a1\u65e5\u5fd7',
+  logFailed: '\u52a0\u8f7d\u4efb\u52a1\u65e5\u5fd7\u5931\u8d25\uff1a',
+};
+let cpaTaskLoadSeq = 0;
 function cpaTaskStateLabel(state) {
-  return ({ queued:'队列中', running:'运行中', completed:'已完成', failed:'失败', legacy:'旧数据' })[state] || state || '-';
+  return ({ queued: CPA_TASK_TEXT.queued, running: CPA_TASK_TEXT.running, completed: CPA_TASK_TEXT.completed, failed: CPA_TASK_TEXT.failed, legacy: CPA_TASK_TEXT.legacy })[state] || state || '-';
 }
 function renderCpaTasks() {
   const body = document.getElementById('cpa-task-tbody');
@@ -1423,29 +1442,32 @@ function renderCpaTasks() {
   const next = document.getElementById('cpa-task-next');
   if (!body || !count) return;
   count.textContent = String(cpaTaskTotal);
-  if (info) info.textContent = `${BUILD_TEXT.page} ${cpaTaskTotal ? cpaTaskPage : 0} ${BUILD_TEXT.page_of} ${cpaTaskTotalPages} ${BUILD_TEXT.page_suffix}`;
+  if (info) info.textContent = `${CPA_TASK_TEXT.page} ${cpaTaskTotal ? cpaTaskPage : 0} / ${cpaTaskTotalPages} ${CPA_TASK_TEXT.pageSuffix}`;
   if (prev) prev.disabled = cpaTaskPage <= 1;
   if (next) next.disabled = cpaTaskPage >= cpaTaskTotalPages;
   body.innerHTML = cpaTasks.length ? cpaTasks.map(item => {
     const exported = Number(item.exported_count || 0);
     const failed = Number(item.failed_count || 0);
     const auths = Number(item.auth_count || 0);
-    const result = `导出 ${exported} / 失败 ${failed} / JSON ${auths}`;
+    const result = `${CPA_TASK_TEXT.exported} ${exported} / ${CPA_TASK_TEXT.failures} ${failed} / ${CPA_TASK_TEXT.json} ${auths}`;
     const taskId = _html(item.task_id || '');
-    return `<tr><td><code>${taskId}</code></td><td>${_html(cpaTaskStateLabel(item.state))}</td><td>${_html(_buildDate(item.started_at))}</td><td>${result}</td><td><button type="button" class="pagi-btn" onclick="openCpaTaskLog('${taskId}')">查看日志</button></td></tr>`;
-  }).join('') : `<tr><td colspan="5" class="empty-row">暂无 CPA 导出记录</td></tr>`;
+    return `<tr><td><code>${taskId}</code></td><td>${_html(cpaTaskStateLabel(item.state))}</td><td>${_html(_buildDate(item.started_at))}</td><td>${result}</td><td><button type="button" class="pagi-btn" onclick="openCpaTaskLog('${taskId}')">${CPA_TASK_TEXT.viewLog}</button></td></tr>`;
+  }).join('') : `<tr><td colspan="5" class="empty-row">${CPA_TASK_TEXT.empty}</td></tr>`;
 }
 async function loadCpaTasks() {
   const body = document.getElementById('cpa-task-tbody');
+  const requestSeq = ++cpaTaskLoadSeq;
   try {
     const data = await _api('GET', `/registration/cpa-auths/tasks?page=${cpaTaskPage}&page_size=${cpaTaskPageSize}`);
+    if (requestSeq !== cpaTaskLoadSeq) return;
     cpaTasks = Array.isArray(data.items) ? data.items : [];
     cpaTaskTotal = Number(data.total || 0);
     cpaTaskTotalPages = Math.max(1, Number(data.total_pages || 1));
     cpaTaskPage = Math.min(Math.max(1, Number(data.page || cpaTaskPage)), cpaTaskTotalPages);
     renderCpaTasks();
   } catch (error) {
-    if (body) body.innerHTML = `<tr><td colspan="5" class="empty-row" style="color:#b42318">CPA 导出记录加载失败：${_html(error.message)}</td></tr>`;
+    if (requestSeq !== cpaTaskLoadSeq) return;
+    if (body) body.innerHTML = `<tr><td colspan="5" class="empty-row" style="color:#b42318">${CPA_TASK_TEXT.loadingFailed}${_html(error.message)}</td></tr>`;
   }
 }
 function changeCpaTaskPage(delta) { const target = cpaTaskPage + (Number(delta) || 0); if (target < 1 || target > cpaTaskTotalPages) return; cpaTaskPage = target; loadCpaTasks(); }
@@ -1453,14 +1475,14 @@ function setCpaTaskPageSize(value) { const size = Number(value); cpaTaskPageSize
 async function openCpaTaskLog(taskId) {
   const title = document.getElementById('cpa-task-log-title');
   const content = document.getElementById('cpa-task-log-content');
-  if (title) title.textContent = `CPA 导出任务日志 - ${taskId}`;
-  if (content) content.textContent = '暂无可查看的任务日志';
+  if (title) title.textContent = `${CPA_TASK_TEXT.taskLogTitle} - ${taskId}`;
+  if (content) content.textContent = CPA_TASK_TEXT.noLog;
   openModal('modal-cpa-task-log');
   try {
     const data = await _api('GET', `/registration/cpa-auths/tasks/${encodeURIComponent(taskId)}/logs`);
-    if (content) content.textContent = Array.isArray(data.lines) && data.lines.length ? data.lines.join('\n') : '暂无可查看的任务日志';
+    if (content) content.textContent = Array.isArray(data.lines) && data.lines.length ? data.lines.join('\n') : CPA_TASK_TEXT.noLog;
   } catch (error) {
-    if (content) content.textContent = `加载任务日志失败：${error.message}`;
+    if (content) content.textContent = `${CPA_TASK_TEXT.logFailed}${error.message}`;
   }
 }
 

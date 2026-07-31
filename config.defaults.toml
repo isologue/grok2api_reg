@@ -18,6 +18,10 @@ webui_key = ""
 file_level = "INFO"
 # 日志文件最大保留数量（按天轮转）
 max_files = 7
+# 请求审计记录保留天数；填写 0 表示不自动清理。
+request_audit_retention_days = 7
+# CPA 导出任务日志保留天数；填写 0 表示不自动清理，不影响 CPA Auth JSON。
+cpa_task_retention_days = 7
 
 [logging.trace]
 # 记录上游请求的脱敏参数、选中账号标识与返回内容，可从管理后台日志页查看。

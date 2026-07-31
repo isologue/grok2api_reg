@@ -83,6 +83,52 @@ def _read_locked(*, limit: int = _MAX_ITEMS) -> list[dict[str, Any]]:
     return rows[-limit:]
 
 
+def purge_before(cutoff_ms: int) -> int:
+    """Delete audit rows older than *cutoff_ms* and atomically rewrite the journal.
+
+    Rows without a valid ``created_at`` and malformed JSONL lines are retained
+    rather than guessed at, so a legacy or partially damaged record is never
+    removed by the retention job.
+    The caller must hold no lock; this function serializes with writers itself.
+    """
+    cutoff = int(cutoff_ms)
+    with _LOCK:
+        if not _PATH.is_file():
+            return 0
+
+        kept: list[bytes] = []
+        removed = 0
+        with _PATH.open("rb") as handle:
+            for raw in handle:
+                try:
+                    value = orjson.loads(raw)
+                except orjson.JSONDecodeError:
+                    # Preserve malformed legacy lines; the normal reader already
+                    # ignores them, and retention must not destroy evidence.
+                    kept.append(raw if raw.endswith(b"\n") else raw + b"\n")
+                    continue
+                if not isinstance(value, dict):
+                    kept.append(raw if raw.endswith(b"\n") else raw + b"\n")
+                    continue
+                try:
+                    created_at = int(value.get("created_at"))
+                except (TypeError, ValueError):
+                    kept.append(orjson.dumps(value) + b"\n")
+                    continue
+                if created_at < cutoff:
+                    removed += 1
+                else:
+                    kept.append(orjson.dumps(value) + b"\n")
+
+        if not removed:
+            return 0
+
+        temp = _PATH.with_suffix(".tmp")
+        temp.write_bytes(b"".join(kept))
+        temp.replace(_PATH)
+        return removed
+
+
 def _filtered_items(*, query: str = "", provider: str = "", status: str = "") -> list[dict[str, Any]]:
     needle = str(query or "").strip().lower()
     with _LOCK:
@@ -151,4 +197,4 @@ def summary() -> dict[str, Any]:
     failed = sum(1 for row in rows if int(row.get("status_code") or 0) >= 400)
     return {"total": total, "success": success, "failed": failed, "latest_at": rows[-1].get("created_at") if rows else 0}
 
-__all__ = ["record", "list_items", "list_page", "get_item", "summary"]
+__all__ = ["record", "list_items", "list_page", "get_item", "summary", "purge_before"]
