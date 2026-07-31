@@ -544,6 +544,17 @@ const SCHEMA_DEF = [
         ]
       },
       {
+        title: 'Grok Build \u8d26\u53f7\u6c60',
+        section: 'build',
+        fields: [
+          { key: 'max_retries', label: 'Build \u5931\u8d25\u540e\u6700\u591a\u66f4\u6362\u8d26\u53f7\u6570', type: 'number', min: 0, desc: 'Grok Build OAuth / CPA Auth \u8d26\u53f7\u6c60\u4e13\u7528\u30020 \u8868\u793a\u4e0d\u6362\u53f7\u3002\u4fdd\u5b58\u540e\u5bf9\u4e0b\u4e00\u4e2a Build \u8bf7\u6c42\u7acb\u5373\u751f\u6548\uff0c\u65e0\u4ee3\u7801\u786c\u4e0a\u9650\u3002' },
+          { key: 'rate_limit_cooling_sec', label: 'Build \u9650\u6d41\u9ed8\u8ba4\u51b7\u5374\uff08\u79d2\uff09', type: 'number', min: 1, max: 604800, desc: 'Build \u4e0a\u6e38\u8fd4\u56de 429 \u4e14\u672a\u63d0\u4f9b Retry-After \u65f6\u7684\u9ed8\u8ba4\u7b49\u5f85\u65f6\u95f4\u3002\u4e0a\u6e38\u63d0\u4f9b Retry-After \u65f6\u4f18\u5148\u6309\u5176\u81ea\u52a8\u6062\u590d\u3002' },
+          { key: 'transient_error_cooling_sec', label: 'Build \u4e34\u65f6\u9519\u8bef\u51b7\u5374\uff08\u79d2\uff09', type: 'number', min: 1, max: 86400, desc: '\u7f51\u7edc\u8d85\u65f6\u30015xx \u7b49\u53ef\u6062\u590d\u9519\u8bef\u7684\u77ed\u6682\u51b7\u5374\u65f6\u95f4\u3002\u51b7\u5374\u7ed3\u675f\u540e\u8d26\u53f7\u4f1a\u81ea\u52a8\u91cd\u65b0\u53c2\u4e0e\u8c03\u5ea6\u3002' },
+          { key: 'oauth_refresh_leeway_sec', label: 'Build Token \u63d0\u524d\u5237\u65b0\u9608\u503c\uff08\u79d2\uff09', type: 'number', min: 0, max: 3600, desc: 'Access Token \u8ddd\u8fc7\u671f\u4e0d\u8d85\u8fc7\u8be5\u65f6\u95f4\u65f6\uff0c\u8c03\u5ea6\u524d\u81ea\u52a8\u4f7f\u7528 Refresh Token \u5237\u65b0\u3002OAuth \u5237\u65b0\u4ee4\u724c\u5931\u6548\u4f1a\u6807\u4e3a\u201cOAuth \u5df2\u5931\u6548\u201d\uff0c\u9700\u5728\u8d26\u53f7\u6c60\u4e2d\u91cd\u65b0\u9a8c\u8bc1\u6216\u91cd\u65b0\u5bfc\u5165\u3002' },
+          { key: 'verify_concurrency', label: 'Build \u6279\u91cf\u91cd\u65b0\u9a8c\u8bc1\u5e76\u53d1\u6570', type: 'number', min: 1, max: 50, desc: '\u8d26\u53f7\u7ba1\u7406\u9875\u5bf9\u9009\u4e2d Build \u8d26\u53f7\u6267\u884c\u201c\u91cd\u65b0\u9a8c\u8bc1\u201d\u65f6\u5141\u8bb8\u7684\u6700\u5927\u5e76\u53d1\u6570\u3002' },
+        ]
+      },
+      {
         title: '选号并发限制', titleKey: 'config.schema.groups.selection',
         section: 'account.selection',
         fields: [

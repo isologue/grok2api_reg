@@ -34,6 +34,16 @@ def _is_response_completed_event(raw: str) -> bool:
     return isinstance(event, dict) and str(event.get("type") or "") == "response.completed"
 
 
+def _response_error(message: str, response: Any, body: str) -> UpstreamError:
+    """Preserve safe rate-limit timing metadata for Build account state updates."""
+    error = UpstreamError(message, status=int(response.status_code), body=body)
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
+    if retry_after:
+        error.details["retry_after"] = str(retry_after)
+    return error
+
+
 def _headers(account: BuildAccount, *, model: str = "") -> dict[str, str]:
     headers = {str(k): str(v) for k, v in account.headers.items()}
     conversation_id = secrets.token_hex(16)
@@ -80,7 +90,7 @@ async def fetch_models(account: BuildAccount) -> list[str]:
             raise error from exc
     body = response.content.decode("utf-8", "replace")
     if response.status_code != 200:
-        error = UpstreamError("Grok Build model sync failed", status=response.status_code, body=body[:600])
+        error = _response_error("Grok Build model sync failed", response, body[:600])
         fail_upstream_trace(trace_id, account_token=account.access_token, endpoint=endpoint, error=error, status=response.status_code)
         raise error
     data = orjson.loads(response.content)
@@ -105,7 +115,7 @@ async def create_response(account: BuildAccount, payload: dict[str, Any]) -> dic
             raise error from exc
     body = response.content.decode("utf-8", "replace")
     if response.status_code < 200 or response.status_code >= 300:
-        error = UpstreamError("Grok Build response failed", status=response.status_code, body=body[:1200])
+        error = _response_error("Grok Build response failed", response, body[:1200])
         fail_upstream_trace(trace_id, account_token=account.access_token, endpoint=endpoint, error=error, status=response.status_code)
         raise error
     data = orjson.loads(response.content)
@@ -129,7 +139,7 @@ async def stream_response(account: BuildAccount, payload: dict[str, Any]) -> Asy
             raise error from exc
         if response.status_code < 200 or response.status_code >= 300:
             body = response.content.decode("utf-8", "replace")[:1200]
-            error = UpstreamError("Grok Build response failed", status=response.status_code, body=body)
+            error = _response_error("Grok Build response failed", response, body)
             fail_upstream_trace(trace_id, account_token=account.access_token, endpoint=endpoint, error=error, status=response.status_code)
             raise error
         lines: list[str] = []

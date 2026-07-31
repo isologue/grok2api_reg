@@ -1,6 +1,8 @@
 """Admin APIs for the isolated Grok Build OAuth (CPA Auth) account pool."""
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -9,9 +11,11 @@ from pydantic import BaseModel, Field
 from app.control.account.quota_defaults import supports_mode
 from app.control.account.state_machine import is_manageable
 from app.control.build import store
+from app.control.build.accounts import _now_ms, refresh_account
 from app.control.build.client import fetch_models
 from app.control.build.routes import store as route_store
 from app.control.model.registry import MODELS
+from app.platform.config.snapshot import get_config
 from app.platform.errors import ValidationError
 
 router = APIRouter(prefix="/build", tags=["Admin - Grok Build"])
@@ -29,8 +33,22 @@ class DeleteRequest(BaseModel):
 async def list_accounts(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=2_000),
+    query: str = Query("", max_length=255),
+    status: str = Query("", max_length=64),
 ):
     rows = store.list()
+    needle = query.strip().lower()
+    status_filter = status.strip().lower()
+    if needle:
+        rows = [
+            item for item in rows
+            if needle in " ".join(
+                str(item.get(key) or "")
+                for key in ("email", "user_id", "id", "models", "last_error", "state_reason")
+            ).lower()
+        ]
+    if status_filter:
+        rows = [item for item in rows if str(item.get("status") or "").lower() == status_filter]
     total = len(rows)
     total_pages = max(1, (total + page_size - 1) // page_size)
     current_page = min(page, total_pages)
@@ -43,6 +61,14 @@ async def list_accounts(
         "page_size": page_size,
         "total_pages": total_pages,
     }
+
+
+@router.get("/accounts/{account_id}")
+async def get_account(account_id: str):
+    item = next((row for row in store.list() if row["id"] == account_id), None)
+    if item is None:
+        raise HTTPException(404, "Build account not found")
+    return {"item": item}
 
 
 @router.post("/import")
@@ -59,23 +85,56 @@ async def import_cpa_auth(file: UploadFile = File(...)):
     return {**result, "files": names, "message": "Imported. Sync models before the account is exposed to /v1/models."}
 
 
-@router.post("/accounts/{account_id}/sync")
-async def sync_account(account_id: str):
+async def _sync_models(account_id: str, *, force_oauth_refresh: bool) -> dict[str, Any]:
     account = store.get(account_id)
     if account is None:
         raise HTTPException(404, "Build account not found")
     try:
-        account.models = await fetch_models(account)
-        route_store.sync_discovered(account.models)
-        from app.control.build.accounts import _now_ms
-        account.last_sync_at = _now_ms()
-        account.last_error = ""
-        store.update(account)
+        if force_oauth_refresh:
+            account = await refresh_account(account, force=True)
+        models = await fetch_models(account)
+        route_store.sync_discovered(models)
+        store.mark_verified(account_id, models)
+        return next(row for row in store.list() if row["id"] == account_id)
     except Exception as exc:
-        account.last_error = str(exc)[:500]
-        store.update(account)
-        raise HTTPException(502, f"Build model sync failed: {exc}") from exc
-    return {"item": next(row for row in store.list() if row["id"] == account_id)}
+        store.record_failure(account_id, exc)
+        status = int(getattr(exc, "status", 502) or 502)
+        raise HTTPException(status if 400 <= status < 600 else 502, f"Build account verification failed: {exc}") from exc
+
+
+@router.post("/accounts/{account_id}/sync")
+async def sync_account(account_id: str):
+    return {"item": await _sync_models(account_id, force_oauth_refresh=False)}
+
+
+@router.post("/accounts/{account_id}/verify")
+async def verify_account(account_id: str):
+    """Force an OAuth refresh then fetch models before restoring the account."""
+    return {"item": await _sync_models(account_id, force_oauth_refresh=True)}
+
+
+class BatchVerifyRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
+@router.post("/accounts/verify")
+async def verify_accounts(req: BatchVerifyRequest):
+    try:
+        concurrency = min(max(1, int(get_config("build.verify_concurrency", 3))), 50)
+    except (TypeError, ValueError):
+        concurrency = 3
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def one(account_id: str) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                await _sync_models(account_id, force_oauth_refresh=True)
+                return {"id": account_id, "ok": True}
+            except HTTPException as exc:
+                return {"id": account_id, "ok": False, "status": exc.status_code, "error": str(exc.detail)}
+
+    rows = await asyncio.gather(*(one(account_id) for account_id in dict.fromkeys(req.ids)))
+    return {"items": rows, "succeeded": sum(1 for item in rows if item["ok"]), "failed": sum(1 for item in rows if not item["ok"])}
 
 
 @router.post("/accounts/{account_id}/toggle")

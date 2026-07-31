@@ -606,6 +606,23 @@
     .pagi-btn.on     { background:var(--fg); color:#fff }
     .pagi-btn:disabled { opacity:.35; pointer-events:none }
 
+    /* Build table has textual row actions. Override the compact pagination
+       button dimensions only within this action cell, so labels cannot overlap. */
+    #build-accounts .build-account-action-cell { min-width:198px; white-space:normal }
+    #build-accounts .build-account-actions {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(74px, max-content));
+      gap:7px;
+      align-items:center;
+    }
+    #build-accounts .build-account-actions .pagi-btn {
+      width:100%;
+      min-width:0;
+      padding:0 9px;
+      white-space:nowrap;
+    }
+    #build-accounts .table-wrap th:last-child { min-width:198px }
+
     /* Dialogs */
     #modal-import .modal,
     #modal-import-file .modal { width:min(440px,92vw) }
@@ -1018,14 +1035,25 @@
 
   <section id="build-accounts" style="scroll-margin-top:84px">
     <div class="section-head" style="margin-top:40px">
-      <div class="section-title-row"><div class="section-title">Grok Build 账号池</div><span class="section-count-badge" id="build-account-count">0</span></div>
+      <div class="section-title-row"><div class="section-title" id="build-section-title">Grok Build</div><span class="section-count-badge" id="build-account-count">0</span></div>
       <div class="page-actions">
-        <label class="page-action-btn" style="cursor:pointer"><input id="build-import-file" type="file" accept=".json,.zip" hidden><span>导入 CPA Auth</span></label>
-        <button type="button" class="page-action-btn" onclick="loadBuildAccounts()">刷新</button>
+        <label class="page-action-btn" style="cursor:pointer"><input id="build-import-file" type="file" accept=".json,.zip" hidden><span data-build-text="import"></span></label>
+        <button type="button" class="page-action-btn" id="build-batch-verify" onclick="batchVerifyBuildAccounts()" disabled data-build-text="verifySelected"></button>
+        <button type="button" class="page-action-btn" onclick="loadBuildAccounts()" data-build-text="refresh"></button>
       </div>
     </div>
-    <p class="page-sub" style="margin:0 0 12px">导入 CPA Auth JSON 或 ZIP 后，账号与普通账号池隔离。模型路由请在顶部「模型路由」页面管理。</p>
-    <div class="table-wrap"><table><thead><tr><th>邮箱 / 用户 ID</th><th>状态</th><th>成功调用</th><th>失败调用</th><th>已同步模型</th><th>Token 过期</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="build-account-tbody"><tr><td colspan="8" class="empty-row">正在加载 Grok Build 账号池</td></tr></tbody></table></div>
+    <p class="page-sub" id="build-section-help" style="margin:0 0 12px"></p>
+    <div class="table-toolbar" style="margin-bottom:10px">
+      <div class="table-toolbar-left" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <input class="input" id="build-account-query" type="search" style="width:min(320px,65vw)" onkeydown="if(event.key==='Enter') setBuildAccountFilter()">
+        <select class="input" id="build-account-status" onchange="setBuildAccountFilter()">
+          <option value="" data-build-text="allStatus"></option><option value="active" data-build-text="active"></option><option value="cooling" data-build-text="cooling"></option><option value="disabled" data-build-text="disabled"></option><option value="manual_disabled" data-build-text="manualDisabled"></option>
+        </select>
+        <button type="button" class="pagi-btn" onclick="setBuildAccountFilter()" data-build-text="query"></button><button type="button" class="pagi-btn" onclick="clearBuildAccountFilter()" data-build-text="clear"></button>
+      </div>
+      <div class="pagi-meta" id="build-selected-info"></div>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th style="width:36px"><input type="checkbox" class="cb" id="build-cb-all" onchange="toggleAllBuildAccounts(this.checked)"></th><th data-build-text="emailUser"></th><th data-build-text="status"></th><th data-build-text="reason"></th><th data-build-text="successCalls"></th><th data-build-text="failureCalls"></th><th data-build-text="models"></th><th data-build-text="tokenExpiry"></th><th data-build-text="lastOauthRefresh"></th><th data-build-text="lastError"></th><th data-build-text="actions"></th></tr></thead><tbody id="build-account-tbody"><tr><td colspan="11" class="empty-row" data-build-text="loading"></td></tr></tbody></table></div>
     <div class="pagi" id="build-account-pagi">
       <button type="button" class="pagi-btn" id="build-account-prev" onclick="changeBuildAccountPage(-1)" aria-label="Previous page">&#8249;</button>
       <div class="pagi-meta"><span class="pagi-page" id="build-account-page-info">0 / 0</span><select class="toolbar-page-size" id="build-account-page-size" aria-label="Build page size"><option value="10">10 / &#39029;</option><option value="20">20 / &#39029;</option><option value="50">50 / &#39029;</option><option value="100">100 / &#39029;</option><option value="200">200 / &#39029;</option><option value="500">500 / &#39029;</option><option value="1000">1000 / &#39029;</option><option value="2000">2000 / &#39029;</option></select></div>
@@ -1057,6 +1085,13 @@
     <div class="modal-title" id="cpa-task-log-title">CPA 导出任务日志</div>
     <div class="dialog-body"><pre id="cpa-task-log-content" style="margin:0;max-height:56vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#171717;color:#eee;border-radius:8px;padding:12px;font-size:12px;line-height:1.55"></pre></div>
     <div class="dialog-actions"><button type="button" class="dialog-btn" onclick="closeModal('modal-cpa-task-log')">关闭</button></div>
+  </div>
+</div>
+<div class="modal-overlay" id="modal-build-account-detail">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-title" id="build-account-detail-title">Build</div>
+    <div class="dialog-body"><pre id="build-account-detail-content" style="margin:0;max-height:56vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#171717;color:#eee;border-radius:8px;padding:12px;font-size:12px;line-height:1.55"></pre></div>
+    <div class="dialog-actions"><button type="button" class="dialog-btn" onclick="closeModal('modal-build-account-detail')" data-build-text="close"></button></div>
   </div>
 </div>
 
@@ -1266,13 +1301,63 @@ let buildAccounts = [];
 let buildAccountPage = 1;
 let buildAccountTotal = 0;
 let buildAccountTotalPages = 1;
+let buildAccountQuery = '';
+let buildAccountStatus = '';
+const selectedBuildAccountIds = new Set();
 const BUILD_ACCOUNT_PAGE_SIZE_KEY = 'admin.build_accounts.page_size';
 const BUILD_ACCOUNT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000, 2000];
 let buildAccountPageSize = Number(localStorage.getItem(BUILD_ACCOUNT_PAGE_SIZE_KEY)) || 50;
-const BUILD_TEXT = {"enabled": "\u5df2\u542f\u7528", "disabled": "\u5df2\u7981\u7528", "not_synced": "\u672a\u540c\u6b65", "sync": "\u540c\u6b65", "disable": "\u7981\u7528", "enable": "\u542f\u7528", "delete": "\u5220\u9664", "empty_accounts": "\u6682\u65e0 Grok Build \u8d26\u53f7", "load_failed": "Build \u8d26\u53f7\u6c60\u52a0\u8f7d\u5931\u8d25\uff1a", "sync_ok": "Build \u6a21\u578b\u540c\u6b65\u5b8c\u6210", "sync_failed": "\u540c\u6b65\u5931\u8d25\uff1a", "toggle_failed": "\u66f4\u65b0\u8d26\u53f7\u72b6\u6001\u5931\u8d25\uff1a", "confirm_delete_account": "\u786e\u5b9a\u5220\u9664\u6b64 Grok Build \u8d26\u53f7\u5417\uff1f", "delete_failed": "\u5220\u9664\u5931\u8d25\uff1a", "import_ok": "CPA Auth \u5bfc\u5165\u5b8c\u6210\uff1a\u65b0\u589e", "updated": "\u66f4\u65b0", "skipped": "\u8df3\u8fc7", "import_failed": "CPA Auth \u5bfc\u5165\u5931\u8d25\uff1a", "page": "\u7b2c", "page_of": "/", "page_suffix": "\u9875"};
+const BUILD_TEXT = {
+  pool: 'Grok Build \u8d26\u53f7\u6c60', import: '\u5bfc\u5165 CPA Auth', verifySelected: '\u91cd\u65b0\u9a8c\u8bc1\u9009\u4e2d\u8d26\u53f7', refresh: '\u5237\u65b0',
+  help: '\u8d26\u53f7\u4e0e\u666e\u901a\u8d26\u53f7\u6c60\u9694\u79bb\u3002429 \u4f1a\u663e\u793a\u89e3\u9650\u5012\u8ba1\u65f6\uff1bOAuth \u5237\u65b0\u4ee4\u724c\u5931\u6548\u4f1a\u81ea\u52a8\u505c\u6b62\u8c03\u5ea6\uff0c\u53ef\u901a\u8fc7\u201c\u91cd\u65b0\u9a8c\u8bc1\u201d\u6062\u590d\u3002',
+  searchPlaceholder: '\u641c\u7d22\u90ae\u7bb1\u3001\u7528\u6237 ID\u3001\u6a21\u578b\u6216\u9519\u8bef\u4fe1\u606f', allStatus: '\u5168\u90e8\u72b6\u6001', active: '\u6b63\u5e38', cooling: '\u9650\u6d41 / \u51b7\u5374\u4e2d', disabled: 'OAuth \u5df2\u5931\u6548 / \u7981\u7528', manualDisabled: '\u5df2\u505c\u7528', query: '\u67e5\u8be2', clear: '\u6e05\u7a7a', close: '\u5173\u95ed',
+  emailUser: '\u90ae\u7bb1 / \u7528\u6237 ID', status: '\u72b6\u6001', reason: '\u539f\u56e0 / \u89e3\u9650\u65f6\u95f4', successCalls: '\u6210\u529f\u8c03\u7528', failureCalls: '\u5931\u8d25\u8c03\u7528', models: '\u5df2\u540c\u6b65\u6a21\u578b', tokenExpiry: 'Token \u8fc7\u671f', lastOauthRefresh: '\u6700\u8fd1 OAuth \u5237\u65b0', lastError: '\u6700\u8fd1\u9519\u8bef', actions: '\u64cd\u4f5c', loading: '\u6b63\u5728\u52a0\u8f7d Grok Build \u8d26\u53f7\u6c60',
+  enabled: '\u5df2\u542f\u7528', notSynced: '\u672a\u540c\u6b65', sync: '\u540c\u6b65\u6a21\u578b', verify: '\u91cd\u65b0\u9a8c\u8bc1', disable: '\u505c\u7528', enable: '\u542f\u7528', delete: '\u5220\u9664', emptyAccounts: '\u6682\u65e0 Grok Build \u8d26\u53f7', loadFailed: 'Build \u8d26\u53f7\u6c60\u52a0\u8f7d\u5931\u8d25\uff1a', syncOk: 'Build \u6a21\u578b\u540c\u6b65\u5b8c\u6210', syncFailed: '\u540c\u6b65\u5931\u8d25\uff1a', verifyOk: 'Build \u8d26\u53f7\u91cd\u65b0\u9a8c\u8bc1\u5b8c\u6210', verifyFailed: '\u91cd\u65b0\u9a8c\u8bc1\u5931\u8d25\uff1a', batchVerifyResult: '\u6279\u91cf\u91cd\u65b0\u9a8c\u8bc1\u5b8c\u6210\uff1a\u6210\u529f {ok}\uff0c\u5931\u8d25 {failed}', toggleFailed: '\u66f4\u65b0\u8d26\u53f7\u72b6\u6001\u5931\u8d25\uff1a', confirmDelete: '\u786e\u5b9a\u5220\u9664\u6b64 Grok Build \u8d26\u53f7\u5417\uff1f', deleteFailed: '\u5220\u9664\u5931\u8d25\uff1a', importOk: 'CPA Auth \u5bfc\u5165\u5b8c\u6210\uff1a\u65b0\u589e', updated: '\u66f4\u65b0', skipped: '\u8df3\u8fc7', importFailed: 'CPA Auth \u5bfc\u5165\u5931\u8d25\uff1a', page: '\u7b2c', pageOf: '/', pageSuffix: '\u9875',
+  selected: '\u5df2\u9009\u62e9 {n} \u4e2a\u8d26\u53f7', noneSelected: '\u672a\u9009\u62e9\u8d26\u53f7', unknown: '\u672a\u77e5', rateLimited: '\u4e0a\u6e38\u9650\u6d41', transient: '\u4e34\u65f6\u4e0a\u6e38\u9519\u8bef', refreshTokenInvalid: 'OAuth Refresh Token \u5df2\u5931\u6548', refreshFailed: 'OAuth \u5237\u65b0\u5931\u8d25', authorizationRejected: '\u5237\u65b0\u540e\u4ecd\u88ab\u4e0a\u6e38\u62d2\u7edd', remaining: '\u5269\u4f59 {time}', days: '\u5929', hours: '\u5c0f\u65f6', minutes: '\u5206', seconds: '\u79d2',
+  detailTitle: 'Build \u8d26\u53f7\u72b6\u6001\u8be6\u60c5', detailLoading: '\u6b63\u5728\u52a0\u8f7d\u2026', detailLoadFailed: '\u52a0\u8f7d\u72b6\u6001\u8be6\u60c5\u5931\u8d25\uff1a', email: '\u90ae\u7bb1', userId: '\u7528\u6237 ID', runtimeStatus: '\u8fd0\u884c\u72b6\u6001', stateReason: '\u72b6\u6001\u539f\u56e0', schedulable: '\u662f\u5426\u53c2\u4e0e\u8c03\u5ea6', yes: '\u662f', no: '\u5426', cooldownUntil: '\u9650\u6d41/\u51b7\u5374\u622a\u6b62', remainingCooldown: '\u5269\u4f59\u89e3\u9650\u65f6\u95f4', lastStatus: '\u6700\u8fd1\u4e0a\u6e38\u72b6\u6001\u7801', lastRefresh: '\u6700\u8fd1 OAuth \u5237\u65b0', lastRefreshError: '\u6700\u8fd1 OAuth \u5237\u65b0\u9519\u8bef', syncedModels: '\u5df2\u540c\u6b65\u6a21\u578b', success: '\u6210\u529f\u8c03\u7528', failure: '\u5931\u8d25\u8c03\u7528'
+};
 const _html = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _buildDate = value => value ? new Date(value).toLocaleString() : '-';
+function applyBuildStaticText() {
+  document.getElementById('build-section-title')?.replaceChildren(document.createTextNode(BUILD_TEXT.pool));
+  document.getElementById('build-section-help')?.replaceChildren(document.createTextNode(BUILD_TEXT.help));
+  document.getElementById('build-account-query')?.setAttribute('placeholder', BUILD_TEXT.searchPlaceholder);
+  document.querySelectorAll('[data-build-text]').forEach(node => { const value = BUILD_TEXT[node.dataset.buildText]; if (value) node.textContent = value; });
+  document.getElementById('build-selected-info')?.replaceChildren(document.createTextNode(BUILD_TEXT.noneSelected));
+}
 
+function buildStatusLabel(status) {
+  return ({ active: BUILD_TEXT.active, cooling: BUILD_TEXT.cooling, disabled: BUILD_TEXT.disabled, manual_disabled: BUILD_TEXT.manualDisabled })[status] || BUILD_TEXT.unknown;
+}
+function buildStatusColor(status) { return ({ active: '#198754', cooling: '#b7791f', disabled: '#b42318', manual_disabled: '#6b7280' })[status] || '#6b7280'; }
+function buildReasonLabel(reason) {
+  return ({ rate_limited: BUILD_TEXT.rateLimited, transient_upstream_failure: BUILD_TEXT.transient, oauth_refresh_token_invalid: BUILD_TEXT.refreshTokenInvalid, oauth_refresh_failed: BUILD_TEXT.refreshFailed, build_authorization_rejected: BUILD_TEXT.authorizationRejected })[reason] || reason || '-';
+}
+function buildRemaining(ms) {
+  let seconds = Math.max(0, Math.ceil(Number(ms || 0) / 1000));
+  const days = Math.floor(seconds / 86400); seconds %= 86400;
+  const hours = Math.floor(seconds / 3600); seconds %= 3600;
+  const mins = Math.floor(seconds / 60); seconds %= 60;
+  if (days) return `${days} ${BUILD_TEXT.days} ${hours} ${BUILD_TEXT.hours}`;
+  if (hours) return `${hours} ${BUILD_TEXT.hours} ${mins} ${BUILD_TEXT.minutes}`;
+  if (mins) return `${mins} ${BUILD_TEXT.minutes} ${seconds} ${BUILD_TEXT.seconds}`;
+  return `${seconds} ${BUILD_TEXT.seconds}`;
+}
+function buildStatusDescription(item) {
+  const reason = buildReasonLabel(item.state_reason || item.cooldown_reason);
+  return item.status === 'cooling' ? `${reason} / ${BUILD_TEXT.remaining.replace('{time}', buildRemaining(item.cooldown_remaining_ms))}` : reason;
+}
+function updateBuildSelectionUi() {
+  const selected = selectedBuildAccountIds.size;
+  const info = document.getElementById('build-selected-info');
+  const button = document.getElementById('build-batch-verify');
+  const all = document.getElementById('build-cb-all');
+  if (info) info.textContent = selected ? BUILD_TEXT.selected.replace('{n}', String(selected)) : BUILD_TEXT.noneSelected;
+  if (button) button.disabled = !selected;
+  if (all) { const visible = buildAccounts.map(item => item.id); all.checked = visible.length > 0 && visible.every(id => selectedBuildAccountIds.has(id)); all.indeterminate = !all.checked && visible.some(id => selectedBuildAccountIds.has(id)); }
+}
+function toggleBuildAccountSelected(id, checked) { if (checked) selectedBuildAccountIds.add(id); else selectedBuildAccountIds.delete(id); updateBuildSelectionUi(); }
+function toggleAllBuildAccounts(checked) { buildAccounts.forEach(item => { if (checked) selectedBuildAccountIds.add(item.id); else selectedBuildAccountIds.delete(item.id); }); updateBuildSelectionUi(); }
 function renderBuildAccounts() {
   const body = document.getElementById('build-account-tbody');
   const count = document.getElementById('build-account-count');
@@ -1280,27 +1365,24 @@ function renderBuildAccounts() {
   const prev = document.getElementById('build-account-prev');
   const next = document.getElementById('build-account-next');
   if (!body || !count) return;
-  const total = buildAccountTotal;
-  const totalPages = buildAccountTotalPages;
-  const items = buildAccounts;
-  count.textContent = String(total);
-  if (info) info.textContent = `${BUILD_TEXT.page} ${total ? buildAccountPage : 0} ${BUILD_TEXT.page_of} ${totalPages} ${BUILD_TEXT.page_suffix}`;
+  count.textContent = String(buildAccountTotal);
+  if (info) info.textContent = `${BUILD_TEXT.page} ${buildAccountTotal ? buildAccountPage : 0} ${BUILD_TEXT.pageOf} ${buildAccountTotalPages} ${BUILD_TEXT.pageSuffix}`;
   if (prev) prev.disabled = buildAccountPage <= 1;
-  if (next) next.disabled = buildAccountPage >= totalPages;
-  body.innerHTML = items.length ? items.map(item => `
-    <tr>
-      <td>${_html(item.email || item.user_id || item.id)}</td>
-      <td>${item.enabled ? BUILD_TEXT.enabled : BUILD_TEXT.disabled}</td>
-      <td class="table-center" style="font-variant-numeric:tabular-nums;color:#198754">${Number(item.success_count || 0)}</td>
-      <td class="table-center" style="font-variant-numeric:tabular-nums;color:#b42318">${Number(item.failure_count || 0)}</td>
-      <td>${_html((item.models || []).join(', ') || BUILD_TEXT.not_synced)}</td>
-      <td>${_html(_buildDate(item.expires_at))}</td>
-      <td>${_html(item.last_error || '-')}</td>
-      <td><button class="pagi-btn" onclick="syncBuildAccount('${_html(item.id)}')">${BUILD_TEXT.sync}</button> <button class="pagi-btn" onclick="toggleBuildAccount('${_html(item.id)}', ${!item.enabled})">${item.enabled ? BUILD_TEXT.disable : BUILD_TEXT.enable}</button> <button class="pagi-btn" onclick="deleteBuildAccount('${_html(item.id)}')">${BUILD_TEXT.delete}</button></td>
-    </tr>`).join('') : `<tr><td colspan="8" class="empty-row">${BUILD_TEXT.empty_accounts}</td></tr>`;
+  if (next) next.disabled = buildAccountPage >= buildAccountTotalPages;
+  body.innerHTML = buildAccounts.length ? buildAccounts.map(item => {
+    const status = item.status || (item.enabled ? 'active' : 'manual_disabled');
+    const id = _html(item.id);
+    const checked = selectedBuildAccountIds.has(item.id) ? ' checked' : '';
+    const reason = buildStatusDescription(item);
+    const toggle = item.enabled ? `<button type="button" class="pagi-btn" onclick="toggleBuildAccount('${id}', false)">${BUILD_TEXT.disable}</button>` : `<button type="button" class="pagi-btn" onclick="toggleBuildAccount('${id}', true)">${BUILD_TEXT.enable}</button>`;
+    return `<tr><td><input type="checkbox" class="cb"${checked} onchange="toggleBuildAccountSelected('${id}', this.checked)"></td><td><div>${_html(item.email || item.user_id || item.id)}</div>${item.email && item.user_id ? `<small style="color:#6b7280">${_html(item.user_id)}</small>` : ''}</td><td><button type="button" class="pagi-btn" style="color:${buildStatusColor(status)};border-color:currentColor" onclick="showBuildAccountDetails('${id}')">${buildStatusLabel(status)}</button></td><td title="${_html(reason)}">${_html(reason)}</td><td class="table-center" style="font-variant-numeric:tabular-nums;color:#198754">${Number(item.success_count || 0)}</td><td class="table-center" style="font-variant-numeric:tabular-nums;color:#b42318">${Number(item.failure_count || 0)}</td><td title="${_html((item.models || []).join(', '))}">${_html((item.models || []).join(', ') || BUILD_TEXT.notSynced)}</td><td>${_html(_buildDate(item.expires_at))}</td><td>${_html(_buildDate(item.last_refresh_at))}</td><td title="${_html(item.last_error || item.last_refresh_error || '')}">${_html(item.last_error || item.last_refresh_error || '-')}</td><td class="build-account-action-cell"><div class="build-account-actions"><button type="button" class="pagi-btn" onclick="syncBuildAccount('${id}')">${BUILD_TEXT.sync}</button><button type="button" class="pagi-btn" onclick="verifyBuildAccount('${id}')">${BUILD_TEXT.verify}</button>${toggle}<button type="button" class="pagi-btn" onclick="deleteBuildAccount('${id}')">${BUILD_TEXT.delete}</button></div></td></tr>`;
+  }).join('') : `<tr><td colspan="11" class="empty-row">${BUILD_TEXT.emptyAccounts}</td></tr>`;
+  updateBuildSelectionUi();
 }
 function changeBuildAccountPage(delta) { const target = buildAccountPage + (Number(delta) || 0); if (target < 1 || target > buildAccountTotalPages) return; buildAccountPage = target; loadBuildAccounts(); }
 function setBuildAccountPageSize(value) { const size = Number(value); buildAccountPageSize = BUILD_ACCOUNT_PAGE_SIZE_OPTIONS.includes(size) ? size : 50; localStorage.setItem(BUILD_ACCOUNT_PAGE_SIZE_KEY, String(buildAccountPageSize)); buildAccountPage = 1; loadBuildAccounts(); }
+function setBuildAccountFilter() { buildAccountQuery = document.getElementById('build-account-query')?.value.trim() || ''; buildAccountStatus = document.getElementById('build-account-status')?.value || ''; buildAccountPage = 1; loadBuildAccounts(); }
+function clearBuildAccountFilter() { const query = document.getElementById('build-account-query'); const status = document.getElementById('build-account-status'); if (query) query.value = ''; if (status) status.value = ''; buildAccountQuery = ''; buildAccountStatus = ''; buildAccountPage = 1; loadBuildAccounts(); }
 function cpaTaskStateLabel(state) {
   return ({ queued:'队列中', running:'运行中', completed:'已完成', failed:'失败', legacy:'旧数据' })[state] || state || '-';
 }
@@ -1356,20 +1438,31 @@ async function openCpaTaskLog(taskId) {
 async function loadBuildAccounts() {
   const body = document.getElementById('build-account-tbody');
   try {
-    const accounts = await _api('GET', `/build/accounts?page=${buildAccountPage}&page_size=${buildAccountPageSize}`);
+    const accounts = await _api('GET', `/build/accounts?page=${buildAccountPage}&page_size=${buildAccountPageSize}&query=${encodeURIComponent(buildAccountQuery)}&status=${encodeURIComponent(buildAccountStatus)}`);
     buildAccounts = Array.isArray(accounts.items) ? accounts.items : [];
     buildAccountTotal = Number(accounts.total || 0);
     buildAccountTotalPages = Math.max(1, Number(accounts.total_pages || 1));
     buildAccountPage = Math.min(Math.max(1, Number(accounts.page || buildAccountPage)), buildAccountTotalPages);
     renderBuildAccounts();
   } catch (error) {
-    if (body) body.innerHTML = `<tr><td colspan="6" class="empty-row" style="color:#b42318">${BUILD_TEXT.load_failed}${_html(error.message)}</td></tr>`;
-    showToast(`${BUILD_TEXT.load_failed}${error.message}`, 'error');
+    if (body) body.innerHTML = `<tr><td colspan="11" class="empty-row" style="color:#b42318">${BUILD_TEXT.loadFailed}${_html(error.message)}</td></tr>`;
+    showToast(`${BUILD_TEXT.loadFailed}${error.message}`, 'error');
   }
 }
-async function syncBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/sync`); showToast(BUILD_TEXT.sync_ok, 'success'); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.sync_failed}${error.message}`, 'error'); } }
-async function toggleBuildAccount(id, enabled) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/toggle`, { enabled }); await loadBuildAccounts(); } catch (error) { showToast(`${BUILD_TEXT.toggle_failed}${error.message}`, 'error'); } }
-async function deleteBuildAccount(id) { if (!confirm(BUILD_TEXT.confirm_delete_account)) return; try { await _api('DELETE', '/build/accounts', { ids: [id] }); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.delete_failed}${error.message}`, 'error'); } }
+async function showBuildAccountDetails(id) {
+  const title = document.getElementById('build-account-detail-title'); const content = document.getElementById('build-account-detail-content');
+  if (title) title.textContent = BUILD_TEXT.detailTitle; if (content) content.textContent = BUILD_TEXT.detailLoading; openModal('modal-build-account-detail');
+  try {
+    const response = await _api('GET', `/build/accounts/${encodeURIComponent(id)}`); const item = response.item || {}; const status = item.status || (item.enabled ? 'active' : 'manual_disabled');
+    const lines = [`${BUILD_TEXT.email}: ${item.email || '-'}`, `${BUILD_TEXT.userId}: ${item.user_id || '-'}`, `${BUILD_TEXT.runtimeStatus}: ${buildStatusLabel(status)}`, `${BUILD_TEXT.stateReason}: ${buildReasonLabel(item.state_reason || item.cooldown_reason)}`, `${BUILD_TEXT.schedulable}: ${item.available ? BUILD_TEXT.yes : BUILD_TEXT.no}`, `${BUILD_TEXT.cooldownUntil}: ${item.cooldown_until ? _buildDate(item.cooldown_until) : '-'}`, `${BUILD_TEXT.remainingCooldown}: ${status === 'cooling' ? buildRemaining(item.cooldown_remaining_ms) : '-'}`, `${BUILD_TEXT.lastStatus}: ${item.last_status_code || '-'}`, `${BUILD_TEXT.lastRefresh}: ${_buildDate(item.last_refresh_at)}`, `${BUILD_TEXT.lastRefreshError}: ${item.last_refresh_error || '-'}`, `${BUILD_TEXT.lastError}: ${item.last_error || '-'}`, `${BUILD_TEXT.syncedModels}: ${(item.models || []).join(', ') || BUILD_TEXT.notSynced}`, `${BUILD_TEXT.success}: ${Number(item.success_count || 0)}`, `${BUILD_TEXT.failure}: ${Number(item.failure_count || 0)}`];
+    if (content) content.textContent = lines.join('\n');
+  } catch (error) { if (content) content.textContent = `${BUILD_TEXT.detailLoadFailed}${error.message}`; }
+}
+async function syncBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/sync`); showToast(BUILD_TEXT.syncOk, 'success'); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.syncFailed}${error.message}`, 'error'); } }
+async function verifyBuildAccount(id) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/verify`); showToast(BUILD_TEXT.verifyOk, 'success'); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.verifyFailed}${error.message}`, 'error'); await loadBuildAccounts(); } }
+async function batchVerifyBuildAccounts() { const ids = [...selectedBuildAccountIds]; if (!ids.length) return; try { const result = await _api('POST', '/build/accounts/verify', { ids }); showToast(BUILD_TEXT.batchVerifyResult.replace('{ok}', Number(result.succeeded || 0)).replace('{failed}', Number(result.failed || 0)), Number(result.failed || 0) ? 'warning' : 'success'); selectedBuildAccountIds.clear(); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.verifyFailed}${error.message}`, 'error'); } }
+async function toggleBuildAccount(id, enabled) { try { await _api('POST', `/build/accounts/${encodeURIComponent(id)}/toggle`, { enabled }); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.toggleFailed}${error.message}`, 'error'); } }
+async function deleteBuildAccount(id) { if (!confirm(BUILD_TEXT.confirmDelete)) return; try { await _api('DELETE', '/build/accounts', { ids: [id] }); selectedBuildAccountIds.delete(id); await Promise.all([loadBuildAccounts(), load()]); } catch (error) { showToast(`${BUILD_TEXT.deleteFailed}${error.message}`, 'error'); } }
 async function importBuildCpa(file) {
   if (!file) return;
   try {
@@ -1392,6 +1485,7 @@ if (cpaTaskPageSizeSelect) { cpaTaskPageSize = CPA_TASK_PAGE_SIZE_OPTIONS.includ
 (async () => {
   await waitI18n();
   applyAccountI18n();
+  applyBuildStaticText();
   await renderAdminHeader?.();
   await renderSiteFooter?.();
   initFilterMenu();

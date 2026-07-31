@@ -197,3 +197,19 @@ asset_upload_concurrency = 10
 asset_list_concurrency   = 50
 # 删除 Asset 并发数（全局，跨所有并发请求共享；也作为管理后台批量清理的 token 级默认值）
 asset_delete_concurrency = 50
+
+
+# Grok Build OAuth / CPA Auth account pool. These values are hot-reloadable
+# from the Admin configuration page under Task Scheduling.
+[build]
+# Maximum number of different Build accounts to try after a request failure.
+# 0 means do not fail over. There is intentionally no code-side hard cap.
+max_retries = 1
+# Fallback cooldown when Build replies 429 without a Retry-After header.
+rate_limit_cooling_sec = 900
+# Cooldown for temporary network/upstream errors (5xx, timeout, etc.).
+transient_error_cooling_sec = 60
+# Refresh access token through the OAuth refresh token when this close to expiry.
+oauth_refresh_leeway_sec = 120
+# Maximum parallel administrator "re-verify" jobs for Build accounts.
+verify_concurrency = 3

@@ -9,6 +9,7 @@ from typing import Any
 import orjson
 
 from app.control.build import store
+from app.control.build.accounts import refresh_account
 from app.control.build.client import create_response, stream_response
 from app.control.build.routes import store as route_store
 from app.platform.config.snapshot import get_config
@@ -18,11 +19,18 @@ from app.platform.request_audit import record as record_audit
 
 
 def _retry_count() -> int:
-    return max(0, min(3, get_config().get_int("build.max_retries", 1)))
+    """Build failover count is fully controlled by live configuration."""
+    return max(0, get_config().get_int("build.max_retries", 1))
 
 
 def _retryable(exc: BaseException) -> bool:
     return getattr(exc, "status", None) in {401, 403, 408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def _is_oauth_refresh_failure(exc: BaseException) -> bool:
+    """Avoid treating a failed token refresh itself as an upstream 401 replay."""
+    details = getattr(exc, "details", None)
+    return isinstance(details, dict) and bool(details.get("build_oauth_refresh"))
 
 
 def _route(public_model: str, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -37,6 +45,47 @@ def _route(public_model: str, payload: dict[str, Any]) -> tuple[str, dict[str, A
 
 def _account_label(lease: Any) -> str:
     return str(lease.account.email or lease.account.user_id or lease.account.id)
+
+
+async def _create_with_auth_replay(account: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Replay exactly once on the same account after a forced OAuth refresh."""
+    try:
+        return await create_response(account, payload)
+    except UpstreamError as first_error:
+        if (
+            getattr(first_error, "status", None) not in {401, 403}
+            or _is_oauth_refresh_failure(first_error)
+        ):
+            raise
+        refreshed = await refresh_account(account, force=True)
+        try:
+            return await create_response(refreshed, payload)
+        except UpstreamError as replay_error:
+            if getattr(replay_error, "status", None) in {401, 403}:
+                replay_error.details["build_auth_rechecked"] = True
+            raise
+
+
+async def _stream_with_auth_replay(account: Any, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
+    """Replay a stream once only when auth fails before the first SSE event."""
+    replayed = False
+    current = account
+    while True:
+        emitted = False
+        try:
+            async for line in stream_response(current, payload):
+                emitted = True
+                yield line
+            return
+        except UpstreamError as error:
+            if emitted or _is_oauth_refresh_failure(error) or getattr(error, "status", None) not in {401, 403}:
+                raise
+            if replayed:
+                error.details["build_auth_rechecked"] = True
+                raise
+            replayed = True
+            current = await refresh_account(current, force=True)
+            continue
 
 
 def _sse_response_state(raw: str) -> str:
@@ -60,7 +109,7 @@ async def create(*, model: str, payload: dict[str, Any], operation: str = "respo
         lease = store.reserve(upstream_model, exclude_ids=excluded)
         started = time.monotonic()
         try:
-            result = await create_response(lease.account, body)
+            result = await _create_with_auth_replay(lease.account, body)
         except BaseException as exc:
             last_error = exc
             store.release(lease, success=False, error=exc)
@@ -91,7 +140,7 @@ async def stream(*, model: str, payload: dict[str, Any], operation: str = "respo
         success = False
         captured: list[str] = []
         try:
-            async for line in stream_response(lease.account, body):
+            async for line in _stream_with_auth_replay(lease.account, body):
                 emitted = True
                 state = _sse_response_state(line)
                 if state == "response.completed":
