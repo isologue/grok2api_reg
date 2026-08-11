@@ -75,6 +75,21 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "_", value)[:64] or "provider"
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
 class RegistrationManager:
     """One supervised browser registration task per API process.
 
@@ -127,9 +142,12 @@ class RegistrationManager:
             if not isinstance(item, dict):
                 continue
             clone = dict(item)
-            secret = str(clone.pop("api_key", "") or "")
+            api_secret = str(clone.pop("api_key", "") or "")
+            admin_secret = str(clone.pop("admin_password", "") or "")
             clone["api_key"] = ""
-            clone["api_key_configured"] = bool(secret)
+            clone["api_key_configured"] = bool(api_secret)
+            clone["admin_password"] = ""
+            clone["admin_password_configured"] = bool(admin_secret)
             if str(clone.get("type") or "") == "outlook_token":
                 mailbox_text = str(clone.pop("mailboxes", "") or "")
                 from .mail import expand_outlook_aliases, outlook_pool_stats, parse_outlook_credentials
@@ -170,7 +188,11 @@ class RegistrationManager:
             item = dict(value)
             item["id"] = _safe_name(str(item.get("id") or uuid.uuid4().hex[:10]))
             item["type"] = str(item.get("type") or "gptmail").strip().lower()
-            default_name = {"tempmail_lol": "TempMail.lol", "outlook_token": "Microsoft ?????"}.get(item["type"], "GptMail")
+            default_name = {
+                "tempmail_lol": "TempMail.lol",
+                "cloudflare_temp_email": "Cloudflare 临时邮箱",
+                "outlook_token": "Microsoft 邮箱凭据池",
+            }.get(item["type"], "GptMail")
             item["name"] = str(item.get("name") or f"{default_name} {index + 1}").strip()[:80]
             item["enabled"] = bool(item.get("enabled", True))
             # All mailbox APIs share the configured mailbox API proxy.
@@ -196,13 +218,26 @@ class RegistrationManager:
                 raw_domains = [part.strip() for part in raw_domains.split(",")]
             item["domains"] = [str(domain).strip() for domain in (raw_domains or []) if str(domain).strip()]
             item.pop("domain", None)
-            secret = str(item.get("api_key") or "").strip()
-            if not secret:
-                secret = str(old_by_id.get(item["id"], {}).get("api_key") or "")
-            item["api_key"] = secret
-            item.pop("api_key_configured", None)
-            if item["type"] not in {"gptmail", "tempmail_lol", "outlook_token"}:
-                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol, outlook_token")
+            old_item = old_by_id.get(item["id"], {})
+            if item["type"] == "cloudflare_temp_email":
+                admin_password = str(item.get("admin_password") or "").strip()
+                if not admin_password:
+                    # The UI intentionally returns a blank secret after the
+                    # first save; retain the existing administrator password.
+                    admin_password = str(old_item.get("admin_password") or "").strip()
+                item["admin_password"] = admin_password
+                item.pop("api_key", None)
+                item.pop("api_key_configured", None)
+            else:
+                secret = str(item.get("api_key") or "").strip()
+                if not secret:
+                    secret = str(old_item.get("api_key") or "")
+                item["api_key"] = secret
+                item.pop("api_key_configured", None)
+                item.pop("admin_password", None)
+                item.pop("admin_password_configured", None)
+            if item["type"] not in {"gptmail", "tempmail_lol", "cloudflare_temp_email", "outlook_token"}:
+                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol, cloudflare_temp_email, outlook_token")
             mailbox_text = str(item.get("mailboxes") or "")
             old_mailboxes = str(old_by_id.get(item["id"], {}).get("mailboxes") or "")
             if item["type"] == "outlook_token":
@@ -230,20 +265,27 @@ class RegistrationManager:
                     item["message_limit"] = max(1, min(100, int(item.get("message_limit") or 10)))
                     item["alias_per_email"] = max(0, min(200, int(item.get("alias_per_email") or 0)))
                 except (TypeError, ValueError) as exc:
-                    raise ValueError("Microsoft ????????????????") from exc
+                    raise ValueError("Microsoft 邮箱池数值配置无效") from exc
                 item["alias_enabled"] = bool(item.get("alias_enabled", False))
                 item["alias_include_original"] = bool(item.get("alias_include_original", True))
                 item["alias_prefix"] = re.sub(r"[^A-Za-z0-9._-]+", "", str(item.get("alias_prefix") or "c2api").strip()) or "c2api"
                 item["preflight_enabled"] = bool(item.get("preflight_enabled", True))
             else:
-                for field in ("mode", "imap_host", "message_limit", "alias_enabled", "alias_per_email", "alias_prefix", "alias_include_original", "preflight_enabled"):
+                for field in ("mode", "imap_host", "message_limit", "alias_enabled", "alias_per_email", "alias_prefix", "alias_include_original", "preflight_enabled", "enableRandomSubdomain", "enable_random_subdomain"):
                     item.pop(field, None)
             if item["type"] == "gptmail" and item["enabled"] and (not item["api_base"] or not item["api_key"]):
                 raise ValueError(f"GptMail provider {item['name']} requires an API base URL and API key")
+            if item["type"] == "cloudflare_temp_email":
+                item["enable_random_subdomain"] = _coerce_bool(
+                    item.get("enable_random_subdomain", item.get("enableRandomSubdomain", True)), True
+                )
+                item.pop("enableRandomSubdomain", None)
+                if item["enabled"] and (not item["api_base"] or not item["admin_password"] or not item["domains"]):
+                    raise ValueError(f"Cloudflare 临时邮箱 服务 {item['name']} 需要填写 API 地址、管理员密码和域名")
             if item["type"] == "outlook_token" and item["enabled"]:
                 from .mail import parse_outlook_credentials
                 if not parse_outlook_credentials(mailbox_text):
-                    raise ValueError("Microsoft ????????????????email----password----client_id----refresh_token")
+                    raise ValueError("Microsoft 凭据格式必须为 email----password----client_id----refresh_token")
             normalized.append(item)
         run = incoming.setdefault("run", {})
         try:
@@ -335,7 +377,7 @@ class RegistrationManager:
             if isinstance(provider, dict) and provider.get("type") == "outlook_token" and str(provider.get("id") or "") == requested_id:
                 rows = outlook_pool_entries(parse_outlook_credentials(str(provider.get("mailboxes") or "")), provider, status)
                 return {"provider_id": requested_id, "status": str(status or "all").strip().lower(), "count": len(rows), "items": rows}
-        raise ValueError("Microsoft ????????")
+        raise ValueError("Microsoft 邮箱服务商不存在")
 
     def reset_outlook_pool(self, scope: str = "all") -> dict[str, Any]:
         """Maintain local Microsoft mailbox pool state without returning credentials."""

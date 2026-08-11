@@ -130,6 +130,237 @@ class GptMailProvider(_MailboxProvider):
         self.session.close()
 
 
+
+
+def _cloudflare_random_name() -> str:
+    """Generate a short local-part accepted by Cloudflare 临时邮箱."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "grok" + "".join(secrets.choice(alphabet) for _ in range(10))
+
+
+def _cloudflare_domains(entry: dict[str, Any]) -> list[str]:
+    raw = entry.get("domains", entry.get("domain", []))
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    return [str(value).strip() for value in (raw or []) if str(value).strip()]
+
+
+def _cloudflare_message_text(value: Any) -> str:
+    """Flatten the common Cloudflare 临时邮箱 body shapes to searchable text."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in ("text", "text_content", "body", "content", "html", "html_content", "html_body"):
+            if key in value:
+                part = _cloudflare_message_text(value.get(key))
+                if part:
+                    parts.append(part)
+        if parts:
+            return "\n".join(parts)
+        return "\n".join(_cloudflare_message_text(part) for part in value.values() if part)
+    if isinstance(value, list):
+        return "\n".join(_cloudflare_message_text(part) for part in value if part)
+    return str(value or "")
+
+
+def _cloudflare_text_candidates(value: Any) -> list[str]:
+    """Extract address-like values from the different inbox JSON shapes."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key in ("address", "email", "name", "value"):
+            if value.get(key):
+                values.extend(_cloudflare_text_candidates(value.get(key)))
+        return values
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(_cloudflare_text_candidates(item))
+        return values
+    return []
+
+
+def _cloudflare_message_matches_address(item: dict[str, Any], address: str) -> bool:
+    """Avoid accepting a stale/shared-inbox message for another address.
+
+    The JWT normally scopes ``/api/mails`` to one mailbox, but some deployments
+    return a shared result list.  If recipient metadata is present, require it
+    to contain the allocated address; if it is absent, keep the message for
+    compatibility with older Cloudflare 临时邮箱 deployments.
+    """
+    target = str(address or "").strip().lower()
+    if not target:
+        return True
+    candidates: list[str] = []
+    for key in (
+        "to", "toEmail", "mailTo", "receiver", "receivers", "address",
+        "email", "envelope_to", "delivered_to", "x_forwarded_to",
+        "x_original_to",
+    ):
+        if key in item:
+            candidates.extend(_cloudflare_text_candidates(item.get(key)))
+    return not candidates or any(target in value.strip().lower() for value in candidates if value.strip())
+
+
+class CloudflareTempMailProvider(_MailboxProvider):
+    """Cloudflare 临时邮箱 admin/API adapter.
+
+    The admin endpoint creates a mailbox and returns a per-mailbox JWT.  That
+    JWT is carried in ``Mailbox.provider_token`` and is used for subsequent
+    inbox reads, so credentials never need to be put in the browser flow.
+    """
+
+    name = "cloudflare_temp_email"
+    poll_interval_seconds = 5.0
+
+    def __init__(self, entry: dict[str, Any], proxy: str = "") -> None:
+        self.display_name = str(entry.get("name") or "Cloudflare 临时邮箱")
+        self.name = self.display_name
+        self.base_url = str(entry.get("api_base") or "").strip().rstrip("/")
+        self.admin_password = str(entry.get("admin_password") or entry.get("api_key") or "").strip()
+        self.domains = _cloudflare_domains(entry)
+        raw_random = entry.get("enable_random_subdomain", entry.get("enableRandomSubdomain", True))
+        self.enable_random_subdomain = self._as_bool(raw_random, True)
+        if not self.base_url:
+            raise RuntimeError(f"Mailbox provider {self.display_name} requires an API base URL")
+        if not self.admin_password:
+            raise RuntimeError(f"Mailbox provider {self.display_name} requires an admin password")
+        if not self.domains:
+            raise RuntimeError(f"Mailbox provider {self.display_name} requires at least one domain")
+        self.session = _create_session(proxy)
+        self.session.headers.update({
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Grok2API/1.0)",
+        })
+        self._message_cache: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "y"}:
+            return True
+        if text in {"0", "false", "no", "off", "n"}:
+            return False
+        return default
+
+    def _request(self, method: str, path: str, *, headers: dict[str, str] | None = None,
+                 params: dict[str, Any] | None = None, payload: dict[str, Any] | None = None,
+                 expected: tuple[int, ...] = (200,)) -> Any:
+        merged = dict(headers or {})
+        if path.startswith("/admin/"):
+            merged.setdefault("x-admin-auth", self.admin_password)
+        try:
+            response = self.session.request(
+                method.upper(), f"{self.base_url}{path}", headers=merged,
+                params=params, json=payload, timeout=30, verify=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Cloudflare 临时邮箱 请求失败：{method.upper()} {path}：{exc}") from exc
+        if response.status_code not in expected:
+            body = str(getattr(response, "text", "") or "").replace("\n", " ").strip()[:300]
+            suffix = f"，响应：{body}" if body else ""
+            raise RuntimeError(f"Cloudflare 临时邮箱 请求失败：{method.upper()} {path}，HTTP {response.status_code}{suffix}")
+        if response.status_code == 204:
+            return {}
+        try:
+            return response.json()
+        except Exception as exc:
+            body = str(getattr(response, "text", "") or "").replace("\n", " ").strip()[:300]
+            raise RuntimeError(f"Cloudflare 临时邮箱 返回了无效 JSON：{body}") from exc
+
+    @staticmethod
+    def _next_domain(domains: list[str]) -> str:
+        # Let the service expand a wildcard subdomain when configured; for a
+        # concrete domain the API still accepts the same payload.
+        return random.choice(domains)
+
+    def create_mailbox(self) -> dict[str, str]:
+        data = self._request(
+            "POST", "/admin/new_address",
+            payload={
+                "enablePrefix": True,
+                "enableRandomSubdomain": self.enable_random_subdomain,
+                "name": _cloudflare_random_name(),
+                "domain": self._next_domain(self.domains),
+            },
+        )
+        if not isinstance(data, dict):
+            raise RuntimeError("Cloudflare 临时邮箱 创建邮箱返回格式无效")
+        address = str(data.get("address") or "").strip()
+        token = str(data.get("jwt") or data.get("token") or "").strip()
+        if not address or not token:
+            raise RuntimeError("Cloudflare 临时邮箱 创建邮箱未返回 address 或 jwt")
+        return {"address": address, "token": token}
+
+    def get_existing_mailbox(self, address: str) -> dict[str, str]:
+        data = self._request("POST", "/admin/get_address", payload={"address": address})
+        if not isinstance(data, dict):
+            raise RuntimeError("Cloudflare 临时邮箱 获取邮箱令牌返回格式无效")
+        result_address = str(data.get("address") or address).strip()
+        token = str(data.get("jwt") or data.get("token") or "").strip()
+        if not result_address or not token:
+            raise RuntimeError(f"Cloudflare 临时邮箱 无法获取邮箱 {address} 的 JWT")
+        return {"address": result_address, "token": token}
+
+    def list_messages(self, address: str, provider_token: str = "") -> list[dict[str, Any]]:
+        if not provider_token:
+            raise RuntimeError("Cloudflare 临时邮箱 邮箱上下文缺少 JWT")
+        response = self._request(
+            "GET", "/api/mails",
+            headers={"Authorization": f"Bearer {provider_token}"},
+            params={"limit": 20, "offset": 0},
+        )
+        raw = response.get("results", []) if isinstance(response, dict) else response
+        if not isinstance(raw, list):
+            raw = []
+        messages: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if not _cloudflare_message_matches_address(item, address):
+                continue
+            message_id = str(item.get("id") or item.get("_id") or item.get("message_id") or item.get("uid") or "").strip()
+            if not message_id:
+                continue
+            subject = str(item.get("subject") or item.get("title") or "")
+            body = _cloudflare_message_text(item.get("text_content") or item.get("text") or item.get("body") or item.get("content") or item.get("html_content") or item.get("html") or "")
+            normalized = {
+                "id": message_id,
+                "subject": subject,
+                "content": body,
+                "text": body,
+                "html_content": str(item.get("html_content") or item.get("html") or ""),
+                "received_at": item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp"),
+                "raw": item,
+            }
+            self._message_cache[message_id] = normalized
+            messages.append(normalized)
+        return messages
+
+    def message_content(self, message_id: str, provider_token: str = "") -> str:
+        cached = self._message_cache.get(str(message_id))
+        if cached:
+            return str(cached.get("content") or cached.get("html_content") or "")
+        # /api/mails already includes message content in the Cloudflare
+        # implementation used by chatgpt2api; avoid an undocumented detail call.
+        if provider_token:
+            for message in self.list_messages("", provider_token):
+                if str(message.get("id") or "") == str(message_id):
+                    return str(message.get("content") or message.get("html_content") or "")
+        return ""
+
+    def close(self) -> None:
+        self.session.close()
+
 class TempMailLolProvider(_MailboxProvider):
     """TempMail.lol v2 inbox API, modelled after chatgpt2api's provider."""
 
@@ -467,7 +698,7 @@ class OutlookTokenError(RuntimeError):
 class OutlookTokenProvider(_MailboxProvider):
     """Microsoft credential pool with Graph API, IMAP and Outlook plus-alias support."""
 
-    name = "Microsoft ?????"
+    name = "Microsoft 邮箱凭据池"
     poll_interval_seconds = 5.0
 
     def __init__(self, entry: dict[str, Any], proxy: str = "") -> None:
@@ -854,7 +1085,7 @@ class MailboxPool:
         enabled = [p for p in providers if bool(p.get("enabled", True))]
         if not enabled:
             raise RuntimeError("At least one mailbox provider must be enabled")
-        factories = {"gptmail": GptMailProvider, "tempmail_lol": TempMailLolProvider, "outlook_token": OutlookTokenProvider}
+        factories = {"gptmail": GptMailProvider, "tempmail_lol": TempMailLolProvider, "cloudflare_temp_email": CloudflareTempMailProvider, "outlook_token": OutlookTokenProvider}
         self._providers: list[_MailboxProvider] = []
         unsupported: list[str] = []
         for entry in enabled:
@@ -1044,4 +1275,4 @@ def extract_verification_code(content: str) -> str | None:
     return numeric.group(1) if numeric else None
 
 
-__all__ = ["MAILBOX_EXHAUSTED_EXIT_CODE", "Mailbox", "MailboxPool", "MailboxRateLimited", "MailboxUnavailableError", "OutlookTokenError", "OutlookTokenProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]
+__all__ = ["MAILBOX_EXHAUSTED_EXIT_CODE", "Mailbox", "MailboxPool", "MailboxRateLimited", "MailboxUnavailableError", "CloudflareTempMailProvider", "OutlookTokenError", "OutlookTokenProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]

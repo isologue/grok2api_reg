@@ -4,11 +4,75 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.control.registration.mail import (
-    MailboxPool, MailboxRateLimited, OutlookTokenError, OutlookTokenProvider, TempMailLolProvider, expand_outlook_aliases,
+    CloudflareTempMailProvider, MailboxPool, MailboxRateLimited, OutlookTokenError, OutlookTokenProvider, TempMailLolProvider, expand_outlook_aliases,
     extract_verification_code, outlook_pool_stats, parse_outlook_credentials,
     remove_outlook_invalid_credentials, reset_outlook_pool_state,
 )
 from app.control.registration.manager import RegistrationManager
+
+
+class CloudflareTempMailProviderTests(unittest.TestCase):
+    def test_create_and_read_inbox_with_jwt(self) -> None:
+        provider = CloudflareTempMailProvider({
+            "name": "Cloudflare Temp Email",
+            "type": "cloudflare_temp_email",
+            "api_base": "https://mail.example.test",
+            "admin_password": "admin-secret",
+            "domains": ["example.test"],
+        })
+        provider._request = Mock(side_effect=[
+            {"address": "new@example.test", "jwt": "mailbox-jwt"},
+            {"results": [{
+                "id": "message-1",
+                "subject": "Verify your email",
+                "text": "Your code is ABC-123",
+                "createdAt": "2026-08-11T01:02:03Z",
+            }]},
+        ])
+        created = provider.create_mailbox()
+        self.assertEqual(created, {"address": "new@example.test", "token": "mailbox-jwt"})
+        self.assertEqual(provider._request.call_args_list[0].kwargs["payload"]["domain"], "example.test")
+        messages = provider.list_messages(created["address"], created["token"])
+        self.assertEqual(messages[0]["id"], "message-1")
+        self.assertIn("ABC-123", messages[0]["content"])
+        self.assertEqual(provider.message_content("message-1", created["token"]), "Your code is ABC-123")
+        provider.close()
+
+    def test_admin_password_is_sent_only_to_admin_endpoints(self) -> None:
+        provider = CloudflareTempMailProvider({
+            "type": "cloudflare_temp_email",
+            "api_base": "https://mail.example.test",
+            "admin_password": "admin-secret",
+            "domains": ["example.test"],
+        })
+        response = Mock(status_code=200)
+        response.json.return_value = {"address": "new@example.test", "jwt": "mailbox-jwt"}
+        provider.session.request = Mock(return_value=response)
+        provider.create_mailbox()
+        headers = provider.session.request.call_args.kwargs["headers"]
+        self.assertEqual(headers["x-admin-auth"], "admin-secret")
+        response.json.return_value = {"results": []}
+        provider.list_messages("new@example.test", "mailbox-jwt")
+        inbox_headers = provider.session.request.call_args.kwargs["headers"]
+        self.assertNotIn("x-admin-auth", inbox_headers)
+        self.assertEqual(inbox_headers["Authorization"], "Bearer mailbox-jwt")
+        provider.close()
+
+    def test_shared_inbox_results_are_filtered_when_recipient_is_present(self) -> None:
+        provider = CloudflareTempMailProvider({
+            "type": "cloudflare_temp_email",
+            "api_base": "https://mail.example.test",
+            "admin_password": "admin-secret",
+            "domains": ["example.test"],
+        })
+        provider._request = Mock(return_value={"results": [
+            {"id": "wrong", "to": "other@example.test", "text": "code ABC-111"},
+            {"id": "right", "to": [{"address": "new@example.test"}], "text": "code ABC-222"},
+            {"id": "legacy", "text": "code ABC-333"},
+        ]})
+        messages = provider.list_messages("new@example.test", "mailbox-jwt")
+        self.assertEqual([item["id"] for item in messages], ["right", "legacy"])
+        provider.close()
 
 
 class TempMailLolProviderTests(unittest.TestCase):
