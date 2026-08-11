@@ -87,7 +87,7 @@
     }
     .stat-grid-quota {
       display:grid;
-      grid-template-columns:repeat(6, minmax(0, 1fr));
+      grid-template-columns:repeat(7, minmax(0, 1fr));
       gap:12px;
       margin-bottom:20px;
     }
@@ -565,7 +565,13 @@
     .q-h { background:#fff4ed; color:#b0632a }
     .q-b { background:#fdf2f7; color:#be3f7f }
     .q-c { background:#f0faf4; color:#2e7d52 }
+    .q-v { background:#eef4ff; color:#4e74b8 }
     .q-z { background:#f6f6f6; color:#a0a0a6 }
+
+    .video-quota-cell { display:flex; flex-direction:column; gap:6px; min-width:160px }
+    .video-quota-top { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap }
+    .video-quota-amount { font-size:12px; font-weight:600; color:#3f3f3f; font-variant-numeric:tabular-nums }
+    .video-quota-meta { font-size:11px; line-height:1.45; color:#8a8a8a }
 
     /* Token monospace */
     .tok { font-family:ui-monospace,monospace; font-size:12px; color:#333 }
@@ -867,6 +873,15 @@
       </div>
       <div class="stat-num" id="s-qc" style="color:#2e7d52">0</div>
     </div>
+    <div class="stat-cell" data-quota-only>
+      <div class="stat-top">
+        <div class="stat-label">视频额度余额</div>
+        <span class="stat-icon" style="color:#4e74b8">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 7h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4z"/><path d="m17 10 3-2v8l-3-2"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-qv" style="color:#4e74b8">0</div>
+    </div>
   </div>
 
   <div class="section-head" style="margin-top:40px">
@@ -1048,6 +1063,7 @@
               <span class="q-pill q-c">C</span>
             </span>
           </th>
+          <th data-quota-only style="min-width:190px"><span class="q-pill q-v" style="margin-right:6px">V</span>视频额度</th>
           <th class="table-center" data-i18n="account.colSuccess">成功</th>
           <th class="table-center" data-i18n="account.colFail">失败</th>
           <th class="table-center" data-i18n="account.colRate">成功率</th>
@@ -1628,6 +1644,7 @@ function getTokenView() {
     qe: 0,
     qh: 0,
     qc: 0,
+    qv: 0,
   };
   const statusCounts = { all: 0, active: 0, cooling: 0, invalid: 0, disabled: 0 };
   const nsfwCounts = { all: 0, enabled: 0, disabled: 0 };
@@ -1666,6 +1683,7 @@ function getTokenView() {
     stats.qe += quota.expert?.remaining || 0;
     stats.qh += quota.heavy?.remaining || 0;
     stats.qc += quota.console?.remaining || 0;
+    stats.qv += quota.video?.remaining || 0;
 
     if (token.status === 'active') stats.active += 1;
     if (token.status === 'cooling') stats.cooling += 1;
@@ -1762,7 +1780,7 @@ function renderStats(view = getTokenView()) {
   $('s-calls', fmt(stats.calls));
   $('s-success', fmt(stats.success));
   $('s-rate', fmtRate(stats.success, stats.fail));
-  $('s-qa', fmt(stats.qa)); $('s-qf', fmt(stats.qf)); $('s-qe', fmt(stats.qe)); $('s-qh', fmt(stats.qh)); $('s-qc', fmt(stats.qc));
+  $('s-qa', fmt(stats.qa)); $('s-qf', fmt(stats.qf)); $('s-qe', fmt(stats.qe)); $('s-qh', fmt(stats.qh)); $('s-qc', fmt(stats.qc)); $('s-qv', fmt(stats.qv));
 }
 
 function renderFilters(view = getTokenView()) {
@@ -1924,7 +1942,7 @@ function renderTable(view = getTokenView()) {
 
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(rowHtml).join('')
-    : `<tr><td colspan="14" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
+    : `<tr><td colspan="15" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
   $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
   $('section-table-count', total);
@@ -1948,6 +1966,85 @@ function cpaExportStatusBadge(t) {
   ].filter(Boolean).join('\n');
   const title = detail ? ` title="${xe(detail)}"` : '';
   return `<span class="badge ${klass}"${title}>${label}</span>`;
+}
+
+function toFiniteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function toFiniteTimestamp(value) {
+  if (value == null || value === '') return null;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return num;
+}
+
+function videoQuotaSummary(record) {
+  const win = record?.quota?.video;
+  if (!win || typeof win !== 'object') {
+    return {
+      klass: 'badge-basic',
+      label: '未配置',
+      amount: '—',
+      detail: '可用：待确认　恢复：—',
+      hint: '当前账号未记录视频额度信息',
+      hasQuota: false,
+    };
+  }
+
+  const remaining = Math.max(0, toFiniteNumber(win.remaining) ?? 0);
+  const totalNum = toFiniteNumber(win.total);
+  const total = totalNum != null && totalNum >= 0 ? totalNum : null;
+  const resetAt = toFiniteTimestamp(win.reset_at);
+  const syncedAt = toFiniteTimestamp(win.synced_at);
+  const source = toFiniteNumber(win.source) ?? 0;
+  const amount = `${remaining}/${total ?? '?'}`;
+  const resetText = resetAt ? fmtDate(resetAt) : '—';
+  const syncedText = syncedAt ? fmtDate(syncedAt) : '—';
+
+  if (source === 0 && !syncedAt) {
+    return {
+      klass: 'badge-basic',
+      label: '待同步',
+      amount,
+      detail: `可用：待确认　恢复：${resetText}`,
+      hint: `默认额度 ${amount}，尚未向上游同步视频额度`,
+      hasQuota: remaining > 0,
+    };
+  }
+
+  if (remaining > 0) {
+    return {
+      klass: 'badge-active',
+      label: '可用',
+      amount,
+      detail: `可用：是　恢复：${resetText}`,
+      hint: `视频额度可用：${amount}；上次同步：${syncedText}`,
+      hasQuota: true,
+    };
+  }
+
+  const waitingReset = !!(resetAt && resetAt > Date.now());
+  return {
+    klass: waitingReset ? 'badge-cooling' : 'badge-failed',
+    label: waitingReset ? '限流中' : '已耗尽',
+    amount,
+    detail: `可用：否　恢复：${resetText}`,
+    hint: waitingReset ? `视频额度已用完，预计恢复时间：${resetText}` : '视频额度已用完，暂无恢复时间',
+    hasQuota: false,
+  };
+}
+
+function videoQuotaHtml(record) {
+  const summary = videoQuotaSummary(record);
+  return `<div class="video-quota-cell" title="${xe(summary.hint)}">
+    <div class="video-quota-top">
+      <span class="badge ${summary.klass}">${summary.label}</span>
+      <span class="video-quota-amount">${summary.amount}</span>
+    </div>
+    <div class="video-quota-meta">${xe(summary.detail)}</div>
+  </div>`;
 }
 
 function rowHtml(t) {
@@ -1992,6 +2089,7 @@ function rowHtml(t) {
       <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
     <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
+    <td data-quota-only>${videoQuotaHtml(t)}</td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#8f8f8f">${success}</td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#9a9a9a">${fail}</td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#9a9a9a">${fmtRate(success, fail)}</td>

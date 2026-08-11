@@ -111,15 +111,24 @@ class SaveTokensRequest(RootModel[dict[str, list[str | TokenImportItem]]]):
 # ---------------------------------------------------------------------------
 
 def _quota_brief(q: dict) -> dict:
-    """Extract {auto, fast, expert, heavy, console} with only remaining/total from stored quota dict."""
+    """Extract compact quota details for the admin account page.
+
+    Besides remaining/total, the UI also needs reset timing for video quota
+    visualisation, so we forward a few lightweight timing fields as-is.
+    """
     out = {}
-    for mode in ("auto", "fast", "expert", "heavy", "console"):
+    for mode in ("auto", "fast", "expert", "heavy", "grok_4_3", "console", "video"):
         v = q.get(mode)
-        if isinstance(v, dict):
-            out[mode] = {
-                "remaining": int(v.get("remaining", 0) or 0),
-                "total": int(v.get("total", 0) or 0),
-            }
+        if not isinstance(v, dict):
+            continue
+        out[mode] = {
+            "remaining": int(v.get("remaining", 0) or 0),
+            "total": int(v.get("total", 0) or 0),
+            "reset_at": v.get("reset_at"),
+            "synced_at": v.get("synced_at"),
+            "window_seconds": int(v.get("window_seconds", 0) or 0),
+            "source": int(v.get("source", 0) or 0),
+        }
     return out
 
 
