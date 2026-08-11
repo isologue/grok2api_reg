@@ -81,9 +81,10 @@ class AccountQuotaSet:
     heavy: QuotaWindow | None = None  # heavy-pool accounts only
     grok_4_3: QuotaWindow | None = None  # super/heavy accounts only
     console: QuotaWindow | None = None  # basic pool console models (console.x.ai)
+    video: QuotaWindow | None = None  # Grok Imagine Video 独立媒体额度
 
     def get(self, mode_id: int) -> QuotaWindow | None:
-        """Return the quota window for *mode_id* (0=auto, 1=fast, 2=expert, 3=heavy, 4=grok_4_3, 5=console)."""
+        """Return the quota window for *mode_id* (0=auto, 1=fast, 2=expert, 3=heavy, 4=grok_4_3, 5=console, 7=video)."""
         if mode_id == 0:
             return self.auto
         if mode_id == 1:
@@ -96,6 +97,8 @@ class AccountQuotaSet:
             return self.grok_4_3
         if mode_id == 5:
             return self.console
+        if mode_id == 7:
+            return self.video
         return None
 
     def set(self, mode_id: int, window: QuotaWindow) -> None:
@@ -110,8 +113,10 @@ class AccountQuotaSet:
             self.heavy = window
         elif mode_id == 4:
             self.grok_4_3 = window
-        else:
-            self.console = window  # mode_id == 5
+        elif mode_id == 5:
+            self.console = window
+        elif mode_id == 7:
+            self.video = window
 
     def to_dict(self) -> dict[str, dict[str, Any]]:
         d: dict[str, dict[str, Any]] = {
@@ -125,6 +130,8 @@ class AccountQuotaSet:
             d["grok_4_3"] = self.grok_4_3.to_dict()
         if self.console is not None:
             d["console"] = self.console.to_dict()
+        if self.video is not None:
+            d["video"] = self.video.to_dict()
         return d
 
     @classmethod
@@ -132,6 +139,7 @@ class AccountQuotaSet:
         heavy_d = d.get("heavy")
         grok_4_3_d = d.get("grok_4_3")
         console_d = d.get("console")
+        video_d = d.get("video")
         return cls(
             auto=QuotaWindow.from_dict(d.get("auto", {})),
             fast=QuotaWindow.from_dict(d.get("fast", {})),
@@ -139,6 +147,7 @@ class AccountQuotaSet:
             heavy=QuotaWindow.from_dict(heavy_d) if heavy_d else None,
             grok_4_3=QuotaWindow.from_dict(grok_4_3_d) if grok_4_3_d else None,
             console=QuotaWindow.from_dict(console_d) if console_d else None,
+            video=QuotaWindow.from_dict(video_d) if video_d else None,
         )
 
 

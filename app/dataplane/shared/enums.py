@@ -14,6 +14,7 @@ class ModeId(IntEnum):
     HEAVY = 3
     GROK_4_3 = 4
     CONSOLE = 5  # console.x.ai 独立配额
+    VIDEO = 7  # Grok Imagine Video 独立媒体额度
 
 
 class PoolId(IntEnum):
@@ -53,6 +54,7 @@ ALL_MODE_IDS: tuple[int, ...] = (
     int(ModeId.HEAVY),
     int(ModeId.GROK_4_3),
     int(ModeId.CONSOLE),
+    int(ModeId.VIDEO),
 )
 
 __all__ = [

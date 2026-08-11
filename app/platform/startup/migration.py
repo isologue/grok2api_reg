@@ -57,6 +57,7 @@ async def run_startup_migrations(
     await _backfill_grok_4_3_quota(account_repo)
     await _normalize_basic_fast_only_quota(account_repo)
     await _backfill_console_quota(account_repo)
+    await _backfill_video_quota(account_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +324,39 @@ async def _backfill_console_quota(repo: "AccountRepository") -> None:
         res = await repo.patch_accounts(batch)
         total += res.patched
     logger.info("account: backfilled quota_console for {} accounts", total)
+
+
+async def _backfill_video_quota(repo: "AccountRepository") -> None:
+    """Backfill quota_video for all accounts that don't have it yet."""
+    from app.control.account.commands import AccountPatch, ListAccountsQuery
+    from app.control.account.quota_defaults import default_quota_window
+
+    patches: list[AccountPatch] = []
+    page = 1
+    while True:
+        result = await repo.list_accounts(
+            ListAccountsQuery(page=page, page_size=_BATCH, include_deleted=False)
+        )
+        for record in result.items:
+            if record.quota_set().video is not None:
+                continue
+            window = default_quota_window(record.pool, 7)
+            if window is None:
+                continue
+            patches.append(AccountPatch(token=record.token, quota_video=window.to_dict()))
+        if page >= result.total_pages:
+            break
+        page += 1
+
+    if not patches:
+        return
+
+    total = 0
+    for i in range(0, len(patches), _BATCH):
+        batch = patches[i : i + _BATCH]
+        res = await repo.patch_accounts(batch)
+        total += res.patched
+    logger.info("account: backfilled quota_video for {} accounts", total)
 
 
 # ---------------------------------------------------------------------------

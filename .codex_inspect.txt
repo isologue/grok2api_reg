@@ -1,0 +1,1018 @@
+
+===== app/dataplane/account/table.py:1-390 =====
+   1: """Columnar runtime account table for high-throughput hot-path selection.
+   2: 
+   3: Memory layout (1 000 accounts):
+   4:   Object-list design  : ~800 KB  (Python object overhead per entry)
+   5:   Columnar array design:  ~80 KB  (packed C arrays)
+   6: 
+   7: All quota, status, health, and counter fields are stored as typed
+   8: ``array.array`` columns indexed by a compact integer slot index.
+   9: """
+  10: 
+  11: import array
+  12: from dataclasses import dataclass, field
+  13: from typing import Iterator
+  14: 
+  15: from ..shared.enums import ALL_MODE_IDS, StatusId
+  16: 
+  17: # ---------------------------------------------------------------------------
+  18: # Column type codes
+  19: #   'B'  uint8   �� pool_id, status_id
+  20: #   'h'  int16   �� quota remaining / total (max 32767; sufficient for all known limits)
+  21: #   'H'  uint16  �� inflight, fail_count
+  22: #   'f'  float32 �� health score
+  23: #   'L'  uint32  �� epoch-second timestamps / window lengths (valid until year 2106)
+  24: # ---------------------------------------------------------------------------
+  25: 
+  26: _QUOTA_COLS = (
+  27:     "quota_auto",
+  28:     "quota_fast",
+  29:     "quota_expert",
+  30:     "quota_heavy",
+  31:     "quota_grok_4_3",
+  32:     "quota_console",
+  33: )
+  34: _RESET_COLS = (
+  35:     "reset_auto",
+  36:     "reset_fast",
+  37:     "reset_expert",
+  38:     "reset_heavy",
+  39:     "reset_grok_4_3",
+  40:     "reset_console",
+  41: )
+  42: _INFLIGHT_CAP = 32_767  # avoid int16 overflow on quota
+  43: 
+  44: # ---------------------------------------------------------------------------
+  45: # AccountRuntimeTable
+  46: # ---------------------------------------------------------------------------
+  47: 
+  48: 
+  49: @dataclass
+  50: class AccountRuntimeTable:
+  51:     """Columnar in-memory account store.
+  52: 
+  53:     Columns are indexed by a compact integer *slot index* (idx).
+  54:     The index space is dense: deleted slots are reused on next bootstrap.
+  55: 
+  56:     Thread-safety: the caller (AccountDirectory) owns all locking.
+  57:     """
+  58: 
+  59:     # --- Identity ---
+  60:     token_by_idx: list[str]      = field(default_factory=list)
+  61:     idx_by_token: dict[str, int] = field(default_factory=dict)
+  62: 
+  63:     # --- Pool / status (uint8) ---
+  64:     pool_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("B"))
+  65:     status_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("B"))
+  66: 
+  67:     # --- Quota remaining per mode (int16; -1 = unknown) ---
+  68:     quota_auto_by_idx: "array.array[int]" = field(
+  69:         default_factory=lambda: array.array("h")
+  70:     )
+  71:     quota_fast_by_idx: "array.array[int]" = field(
+  72:         default_factory=lambda: array.array("h")
+  73:     )
+  74:     quota_expert_by_idx: "array.array[int]" = field(
+  75:         default_factory=lambda: array.array("h")
+  76:     )
+  77:     quota_heavy_by_idx: "array.array[int]" = field(
+  78:         default_factory=lambda: array.array("h")
+  79:     )
+  80:     quota_grok_4_3_by_idx: "array.array[int]" = field(
+  81:         default_factory=lambda: array.array("h")
+  82:     )
+  83: 
+  84:     # --- Quota remaining per mode (int16; -1 = unknown) --- console
+  85:     quota_console_by_idx: "array.array[int]" = field(
+  86:         default_factory=lambda: array.array("h")
+  87:     )
+  88: 
+  89:     # --- Quota total per mode (int16; 0 = unsupported / unknown) ---
+  90:     total_auto_by_idx: "array.array[int]" = field(
+  91:         default_factory=lambda: array.array("h")
+  92:     )
+  93:     total_fast_by_idx: "array.array[int]" = field(
+  94:         default_factory=lambda: array.array("h")
+  95:     )
+  96:     total_expert_by_idx: "array.array[int]" = field(
+  97:         default_factory=lambda: array.array("h")
+  98:     )
+  99:     total_heavy_by_idx: "array.array[int]" = field(
+ 100:         default_factory=lambda: array.array("h")
+ 101:     )
+ 102:     total_grok_4_3_by_idx: "array.array[int]" = field(
+ 103:         default_factory=lambda: array.array("h")
+ 104:     )
+ 105: 
+ 106:     # --- Quota total per mode (int16; 0 = unsupported / unknown) --- console
+ 107:     total_console_by_idx: "array.array[int]" = field(
+ 108:         default_factory=lambda: array.array("h")
+ 109:     )
+ 110: 
+ 111:     # --- Window size per mode (uint32 seconds; 0 = unsupported / unknown) ---
+ 112:     window_auto_by_idx: "array.array[int]" = field(
+ 113:         default_factory=lambda: array.array("L")
+ 114:     )
+ 115:     window_fast_by_idx: "array.array[int]" = field(
+ 116:         default_factory=lambda: array.array("L")
+ 117:     )
+ 118:     window_expert_by_idx: "array.array[int]" = field(
+ 119:         default_factory=lambda: array.array("L")
+ 120:     )
+ 121:     window_heavy_by_idx: "array.array[int]" = field(
+ 122:         default_factory=lambda: array.array("L")
+ 123:     )
+ 124:     window_grok_4_3_by_idx: "array.array[int]" = field(
+ 125:         default_factory=lambda: array.array("L")
+ 126:     )
+ 127: 
+ 128:     # --- Window size per mode (uint32 seconds; 0 = unsupported / unknown) --- console
+ 129:     window_console_by_idx: "array.array[int]" = field(
+ 130:         default_factory=lambda: array.array("L")
+ 131:     )
+ 132: 
+ 133:     # --- Window reset timestamps (uint32 epoch-seconds; 0 = unknown) ---
+ 134:     reset_auto_at_by_idx: "array.array[int]" = field(
+ 135:         default_factory=lambda: array.array("L")
+ 136:     )
+ 137:     reset_fast_at_by_idx: "array.array[int]" = field(
+ 138:         default_factory=lambda: array.array("L")
+ 139:     )
+ 140:     reset_expert_at_by_idx: "array.array[int]" = field(
+ 141:         default_factory=lambda: array.array("L")
+ 142:     )
+ 143:     reset_heavy_at_by_idx: "array.array[int]" = field(
+ 144:         default_factory=lambda: array.array("L")
+ 145:     )
+ 146:     reset_grok_4_3_at_by_idx: "array.array[int]" = field(
+ 147:         default_factory=lambda: array.array("L")
+ 148:     )
+ 149: 
+ 150:     # --- Window reset timestamps (uint32 epoch-seconds; 0 = unknown) --- console
+ 151:     reset_console_at_by_idx: "array.array[int]" = field(
+ 152:         default_factory=lambda: array.array("L")
+ 153:     )
+ 154: 
+ 155:     # --- Runtime counters (uint16) ---
+ 156:     inflight_by_idx: "array.array[int]" = field(
+ 157:         default_factory=lambda: array.array("H")
+ 158:     )
+ 159:     fail_count_by_idx: "array.array[int]" = field(
+ 160:         default_factory=lambda: array.array("H")
+ 161:     )
+ 162: 
+ 163:     # --- Health score (float32; [0.05, 1.0]) ---
+ 164:     health_by_idx: "array.array[float]" = field(
+ 165:         default_factory=lambda: array.array("f")
+ 166:     )
+ 167: 
+ 168:     # --- Last-activity timestamps (uint32 epoch-seconds; 0 = never) ---
+ 169:     last_use_at_by_idx: "array.array[int]" = field(
+ 170:         default_factory=lambda: array.array("L")
+ 171:     )
+ 172:     last_fail_at_by_idx: "array.array[int]" = field(
+ 173:         default_factory=lambda: array.array("L")
+ 174:     )
+ 175: 
+ 176:     # --- Per-account cooldown (random strategy only; uint32 epoch-seconds; 0 = not cooling) ---
+ 177:     cooling_until_s_by_idx: "array.array[int]" = field(
+ 178:         default_factory=lambda: array.array("L")
+ 179:     )
+ 180: 
+ 181:     # --- Pre-computed selection indexes ---
+ 182:     # (pool_id, mode_id) �� set of idx with a supported quota window and status == ACTIVE
+ 183:     mode_available: dict[tuple[int, int], set[int]] = field(default_factory=dict)
+ 184:     # tag string �� set of idx
+ 185:     tag_idx: dict[str, set[int]] = field(default_factory=dict)
+ 186: 
+ 187:     # --- Metadata ---
+ 188:     revision: int = 0
+ 189:     size:     int = 0   # number of live (non-deleted) slots
+ 190: 
+ 191:     # ---------------------------------------------------------------------------
+ 192:     # Internal helpers
+ 193:     # ---------------------------------------------------------------------------
+ 194: 
+ 195:     def _quota_col(self, mode_id: int) -> "array.array[int]":
+ 196:         if mode_id == 0:
+ 197:             return self.quota_auto_by_idx
+ 198:         if mode_id == 1:
+ 199:             return self.quota_fast_by_idx
+ 200:         if mode_id == 2:
+ 201:             return self.quota_expert_by_idx
+ 202:         if mode_id == 3:
+ 203:             return self.quota_heavy_by_idx
+ 204:         if mode_id == 4:
+ 205:             return self.quota_grok_4_3_by_idx
+ 206:         return self.quota_console_by_idx
+ 207: 
+ 208:     def _reset_col(self, mode_id: int) -> "array.array[int]":
+ 209:         if mode_id == 0:
+ 210:             return self.reset_auto_at_by_idx
+ 211:         if mode_id == 1:
+ 212:             return self.reset_fast_at_by_idx
+ 213:         if mode_id == 2:
+ 214:             return self.reset_expert_at_by_idx
+ 215:         if mode_id == 3:
+ 216:             return self.reset_heavy_at_by_idx
+ 217:         if mode_id == 4:
+ 218:             return self.reset_grok_4_3_at_by_idx
+ 219:         return self.reset_console_at_by_idx
+ 220: 
+ 221:     def _total_col(self, mode_id: int) -> "array.array[int]":
+ 222:         if mode_id == 0:
+ 223:             return self.total_auto_by_idx
+ 224:         if mode_id == 1:
+ 225:             return self.total_fast_by_idx
+ 226:         if mode_id == 2:
+ 227:             return self.total_expert_by_idx
+ 228:         if mode_id == 3:
+ 229:             return self.total_heavy_by_idx
+ 230:         if mode_id == 4:
+ 231:             return self.total_grok_4_3_by_idx
+ 232:         return self.total_console_by_idx
+ 233: 
+ 234:     def _window_col(self, mode_id: int) -> "array.array[int]":
+ 235:         if mode_id == 0:
+ 236:             return self.window_auto_by_idx
+ 237:         if mode_id == 1:
+ 238:             return self.window_fast_by_idx
+ 239:         if mode_id == 2:
+ 240:             return self.window_expert_by_idx
+ 241:         if mode_id == 3:
+ 242:             return self.window_heavy_by_idx
+ 243:         if mode_id == 4:
+ 244:             return self.window_grok_4_3_by_idx
+ 245:         return self.window_console_by_idx
+ 246: 
+ 247:     def _add_to_indexes(self, idx: int) -> None:
+ 248:         pool_id   = int(self.pool_by_idx[idx])
+ 249:         status_id = int(self.status_by_idx[idx])
+ 250:         if status_id != int(StatusId.ACTIVE):
+ 251:             return
+ 252:         for mode_id in ALL_MODE_IDS:
+ 253:             if self._window_col(mode_id)[idx] > 0:
+ 254:                 self.mode_available.setdefault((pool_id, mode_id), set()).add(idx)
+ 255: 
+ 256:     def _remove_from_indexes(self, idx: int) -> None:
+ 257:         pool_id = int(self.pool_by_idx[idx])
+ 258:         for mode_id in ALL_MODE_IDS:
+ 259:             bucket = self.mode_available.get((pool_id, mode_id))
+ 260:             if bucket:
+ 261:                 bucket.discard(idx)
+ 262: 
+ 263:     def _remove_from_tag_idx(self, idx: int, tags: list[str]) -> None:
+ 264:         for tag in tags:
+ 265:             bucket = self.tag_idx.get(tag)
+ 266:             if bucket:
+ 267:                 bucket.discard(idx)
+ 268: 
+ 269:     def _add_to_tag_idx(self, idx: int, tags: list[str]) -> None:
+ 270:         for tag in tags:
+ 271:             self.tag_idx.setdefault(tag, set()).add(idx)
+ 272: 
+ 273:     # ---------------------------------------------------------------------------
+ 274:     # Slot append (used during bootstrap)
+ 275:     # ---------------------------------------------------------------------------
+ 276: 
+ 277:     def _append_slot(
+ 278:         self,
+ 279:         token:           str,
+ 280:         pool_id:         int,
+ 281:         status_id:       int,
+ 282:         quota_auto:      int,
+ 283:         quota_fast:      int,
+ 284:         quota_expert:    int,
+ 285:         quota_heavy:     int,
+ 286:         quota_grok_4_3:  int,
+ 287:         quota_console:   int,
+ 288:         total_auto:      int,
+ 289:         total_fast:      int,
+ 290:         total_expert:    int,
+ 291:         total_heavy:     int,
+ 292:         total_grok_4_3:  int,
+ 293:         total_console:   int,
+ 294:         window_auto:     int,
+ 295:         window_fast:     int,
+ 296:         window_expert:   int,
+ 297:         window_heavy:    int,
+ 298:         window_grok_4_3: int,
+ 299:         window_console:  int,
+ 300:         reset_auto:      int,
+ 301:         reset_fast:      int,
+ 302:         reset_expert:    int,
+ 303:         reset_heavy:     int,
+ 304:         reset_grok_4_3:  int,
+ 305:         reset_console:   int,
+ 306:         health:          float,
+ 307:         last_use_s:      int,
+ 308:         last_fail_s:     int,
+ 309:         fail_count:      int,
+ 310:         tags:            list[str],
+ 311:     ) -> int:
+ 312:         idx = len(self.token_by_idx)
+ 313:         self.token_by_idx.append(token)
+ 314:         self.idx_by_token[token] = idx
+ 315:         self.pool_by_idx.append(pool_id)
+ 316:         self.status_by_idx.append(status_id)
+ 317:         self.quota_auto_by_idx.append(max(-1, min(quota_auto, 32767)))
+ 318:         self.quota_fast_by_idx.append(max(-1, min(quota_fast, 32767)))
+ 319:         self.quota_expert_by_idx.append(max(-1, min(quota_expert, 32767)))
+ 320:         self.quota_heavy_by_idx.append(max(-1, min(quota_heavy, 32767)))
+ 321:         self.quota_grok_4_3_by_idx.append(max(-1, min(quota_grok_4_3, 32767)))
+ 322:         self.quota_console_by_idx.append(max(-1, min(quota_console, 32767)))
+ 323:         self.total_auto_by_idx.append(max(0, min(total_auto, 32767)))
+ 324:         self.total_fast_by_idx.append(max(0, min(total_fast, 32767)))
+ 325:         self.total_expert_by_idx.append(max(0, min(total_expert, 32767)))
+ 326:         self.total_heavy_by_idx.append(max(0, min(total_heavy, 32767)))
+ 327:         self.total_grok_4_3_by_idx.append(max(0, min(total_grok_4_3, 32767)))
+ 328:         self.total_console_by_idx.append(max(0, min(total_console, 32767)))
+ 329:         self.window_auto_by_idx.append(max(0, window_auto))
+ 330:         self.window_fast_by_idx.append(max(0, window_fast))
+ 331:         self.window_expert_by_idx.append(max(0, window_expert))
+ 332:         self.window_heavy_by_idx.append(max(0, window_heavy))
+ 333:         self.window_grok_4_3_by_idx.append(max(0, window_grok_4_3))
+ 334:         self.window_console_by_idx.append(max(0, window_console))
+ 335:         self.reset_auto_at_by_idx.append(reset_auto)
+ 336:         self.reset_fast_at_by_idx.append(reset_fast)
+ 337:         self.reset_expert_at_by_idx.append(reset_expert)
+ 338:         self.reset_heavy_at_by_idx.append(reset_heavy)
+ 339:         self.reset_grok_4_3_at_by_idx.append(reset_grok_4_3)
+ 340:         self.reset_console_at_by_idx.append(reset_console)
+ 341:         self.inflight_by_idx.append(0)
+ 342:         self.fail_count_by_idx.append(min(fail_count, 65535))
+ 343:         self.health_by_idx.append(health)
+ 344:         self.last_use_at_by_idx.append(last_use_s)
+ 345:         self.last_fail_at_by_idx.append(last_fail_s)
+ 346:         self.cooling_until_s_by_idx.append(0)
+ 347:         self.size += 1
+ 348:         self._add_to_indexes(idx)
+ 349:         self._add_to_tag_idx(idx, tags)
+ 350:         return idx
+ 351: 
+ 352:     # ---------------------------------------------------------------------------
+ 353:     # Slot update (used during incremental sync)
+ 354:     # ---------------------------------------------------------------------------
+ 355: 
+ 356:     def _update_slot(
+ 357:         self,
+ 358:         idx: int,
+ 359:         pool_id: int,
+ 360:         status_id: int,
+ 361:         quota_auto: int,
+ 362:         quota_fast: int,
+ 363:         quota_expert: int,
+ 364:         quota_heavy: int,
+ 365:         quota_grok_4_3: int,
+ 366:         quota_console: int,
+ 367:         total_auto: int,
+ 368:         total_fast: int,
+ 369:         total_expert: int,
+ 370:         total_heavy: int,
+ 371:         total_grok_4_3: int,
+ 372:         total_console: int,
+ 373:         window_auto: int,
+ 374:         window_fast: int,
+ 375:         window_expert: int,
+ 376:         window_heavy: int,
+ 377:         window_grok_4_3: int,
+ 378:         window_console: int,
+ 379:         reset_auto: int,
+ 380:         reset_fast: int,
+ 381:         reset_expert: int,
+ 382:         reset_heavy: int,
+ 383:         reset_grok_4_3: int,
+ 384:         reset_console: int,
+ 385:         health: float,
+ 386:         last_use_s: int,
+ 387:         last_fail_s: int,
+ 388:         fail_count: int,
+ 389:         old_tags: list[str],
+ 390:         new_tags: list[str],
+
+===== app/dataplane/account/sync.py:1-220 =====
+   1: """Synchronise the AccountRuntimeTable from the control-plane repository.
+   2: 
+   3: Two modes:
+   4:   bootstrap  �� full snapshot load at startup.
+   5:   incremental �� revision-based change scan at runtime.
+   6: """
+   7: 
+   8: from app.platform.logging.logger import logger
+   9: from app.platform.runtime.clock import ms_to_s
+  10: from app.control.account.models import AccountRecord
+  11: from app.control.account.enums import AccountStatus
+  12: from app.control.account.quota_defaults import normalize_quota_set
+  13: from app.control.account.repository import AccountRepository
+  14: from app.control.account.state_machine import derive_status
+  15: from app.control.registration.archive import decrypt_profile
+  16: from app.platform.logging.request_trace import (
+  17:     remove_audit_account_label,
+  18:     replace_audit_account_labels,
+  19:     update_audit_account_label,
+  20: )
+  21: from ..shared.enums import POOL_STR_TO_ID, STATUS_STR_TO_ID, StatusId
+  22: from .table import AccountRuntimeTable, make_empty_table
+  23: 
+  24: 
+  25: def _audit_label(record: AccountRecord) -> str:
+  26:     """Return a safe human-readable account identity for request audits.
+  27: 
+  28:     Registration details are encrypted under ``ext``. They are decrypted only
+  29:     while rebuilding the in-memory runtime label map; raw SSO/login secrets are
+  30:     never written to audit records.
+  31:     """
+  32:     ext = record.ext if isinstance(record.ext, dict) else {}
+  33:     profile = decrypt_profile(ext) or {}
+  34:     oauth = profile.get("oauth") if isinstance(profile.get("oauth"), dict) else {}
+  35:     for value in (
+  36:         profile.get("email"),
+  37:         oauth.get("email"),
+  38:         profile.get("user_id"),
+  39:         oauth.get("user_id"),
+  40:         ext.get("email"),
+  41:         ext.get("user_id"),
+  42:     ):
+  43:         label = str(value or "").strip()
+  44:         if label:
+  45:             return label
+  46:     return ""
+  47: 
+  48: 
+  49: def _record_to_slot_args(record: AccountRecord) -> dict:
+  50:     """Extract columnar values from a control-plane AccountRecord."""
+  51:     qs = normalize_quota_set(record.pool, record.quota_set())
+  52:     effective_status = derive_status(record)
+  53:     cooldown_until_ms = 0
+  54:     try:
+  55:         cooldown_until_ms = max(0, int(record.ext.get("cooldown_until", 0) or 0))
+  56:     except (TypeError, ValueError):
+  57:         cooldown_until_ms = 0
+  58: 
+  59:     # Keep a timed cooling account in the active index and let the selector
+  60:     # filter its runtime cooldown.  This allows it to become selectable when
+  61:     # the deadline passes without requiring a database write or service restart.
+  62:     if effective_status == AccountStatus.COOLING and cooldown_until_ms > 0:
+  63:         status_id = int(StatusId.ACTIVE)
+  64:     else:
+  65:         status_id = STATUS_STR_TO_ID.get(str(effective_status), int(StatusId.ACTIVE))
+  66:     pool_id = POOL_STR_TO_ID.get(record.pool, 0)
+  67: 
+  68:     def _reset_s(window) -> int:
+  69:         if window.reset_at is None:
+  70:             return 0
+  71:         return int(ms_to_s(window.reset_at))
+  72: 
+  73:     def _total(window) -> int:
+  74:         return max(0, int(window.total)) if window is not None else 0
+  75: 
+  76:     def _window_s(window) -> int:
+  77:         return max(0, int(window.window_seconds)) if window is not None else 0
+  78: 
+  79:     heavy_w = qs.heavy
+  80:     grok_4_3_w = qs.grok_4_3
+  81:     console_w = qs.console
+  82:     # fmt: off
+  83:     return dict(
+  84:         pool_id         = pool_id,
+  85:         status_id       = status_id,
+  86:         quota_auto      = max(0, qs.auto.remaining),
+  87:         quota_fast      = max(0, qs.fast.remaining),
+  88:         quota_expert    = max(0, qs.expert.remaining),
+  89:         quota_heavy     = max(0, heavy_w.remaining)     if heavy_w    is not None else -1,
+  90:         quota_grok_4_3  = max(0, grok_4_3_w.remaining) if grok_4_3_w is not None else -1,
+  91:         quota_console   = max(0, console_w.remaining)   if console_w  is not None else -1,
+  92:         total_auto      = _total(qs.auto),
+  93:         total_fast      = _total(qs.fast),
+  94:         total_expert    = _total(qs.expert),
+  95:         total_heavy     = _total(heavy_w),
+  96:         total_grok_4_3  = _total(grok_4_3_w),
+  97:         total_console   = _total(console_w),
+  98:         window_auto     = _window_s(qs.auto),
+  99:         window_fast     = _window_s(qs.fast),
+ 100:         window_expert   = _window_s(qs.expert),
+ 101:         window_heavy    = _window_s(heavy_w),
+ 102:         window_grok_4_3 = _window_s(grok_4_3_w),
+ 103:         window_console  = _window_s(console_w),
+ 104:         reset_auto      = _reset_s(qs.auto),
+ 105:         reset_fast      = _reset_s(qs.fast),
+ 106:         reset_expert    = _reset_s(qs.expert),
+ 107:         reset_heavy     = _reset_s(heavy_w)    if heavy_w    is not None else 0,
+ 108:         reset_grok_4_3  = _reset_s(grok_4_3_w) if grok_4_3_w is not None else 0,
+ 109:         reset_console   = _reset_s(console_w)  if console_w  is not None else 0,
+ 110:         health          = 1.0,
+ 111:         last_use_s      = ms_to_s(record.last_use_at)  if record.last_use_at  else 0,
+ 112:         last_fail_s     = ms_to_s(record.last_fail_at) if record.last_fail_at else 0,
+ 113:         fail_count      = record.usage_fail_count,
+ 114:         cooling_until_s  = (cooldown_until_ms + 999) // 1000 if cooldown_until_ms else 0,
+ 115:         tags            = record.tags,
+ 116:     )
+ 117:     # fmt: on
+ 118: 
+ 119: 
+ 120: async def bootstrap(repository: AccountRepository) -> AccountRuntimeTable:
+ 121:     """Load all non-deleted accounts into a fresh AccountRuntimeTable."""
+ 122:     snapshot = await repository.runtime_snapshot()
+ 123:     table = make_empty_table()
+ 124:     # Cache tags per token for tag_idx.
+ 125:     _tags_by_token: dict[str, list[str]] = {}
+ 126:     audit_labels: dict[str, str] = {}
+ 127: 
+ 128:     for record in snapshot.items:
+ 129:         if record.is_deleted():
+ 130:             continue
+ 131:         args = _record_to_slot_args(record)
+ 132:         tags = args.pop("tags")
+ 133:         cooling_until_s = args.pop("cooling_until_s")
+ 134:         _tags_by_token[record.token] = tags
+ 135:         if label := _audit_label(record):
+ 136:             audit_labels[record.token] = label
+ 137:         idx = table._append_slot(record.token, **args, tags=tags)
+ 138:         table.cooling_until_s_by_idx[idx] = cooling_until_s
+ 139: 
+ 140:     table.revision = snapshot.revision
+ 141:     replace_audit_account_labels(audit_labels)
+ 142:     logger.info(
+ 143:         "account runtime table bootstrapped: revision={} account_count={} pool_count={}",
+ 144:         table.revision,
+ 145:         table.size,
+ 146:         len({k[0] for k in table.mode_available}),
+ 147:     )
+ 148:     return table
+ 149: 
+ 150: 
+ 151: async def apply_changes(
+ 152:     table: AccountRuntimeTable,
+ 153:     repository: AccountRepository,
+ 154:     *,
+ 155:     batch_limit: int = 5000,
+ 156: ) -> bool:
+ 157:     """Incrementally sync changes since ``table.revision``.
+ 158: 
+ 159:     Returns ``True`` if any changes were applied.
+ 160:     """
+ 161:     changed = False
+ 162:     while True:
+ 163:         changeset = await repository.scan_changes(table.revision, limit=batch_limit)
+ 164: 
+ 165:         for token in changeset.deleted_tokens:
+ 166:             remove_audit_account_label(token)
+ 167:             idx = table.idx_by_token.get(token)
+ 168:             if idx is not None:
+ 169:                 table._remove_from_indexes(idx)
+ 170:                 # Mark as deleted in status column so it is skipped.
+ 171:                 table.status_by_idx[idx] = int(StatusId.DELETED)
+ 172:                 table.size = max(0, table.size - 1)
+ 173:                 changed = True
+ 174: 
+ 175:         for record in changeset.items:
+ 176:             if record.is_deleted():
+ 177:                 # Handle soft-delete from items list too.
+ 178:                 remove_audit_account_label(record.token)
+ 179:                 idx = table.idx_by_token.get(record.token)
+ 180:                 if idx is not None:
+ 181:                     table._remove_from_indexes(idx)
+ 182:                     table.status_by_idx[idx] = int(StatusId.DELETED)
+ 183:                     table.size = max(0, table.size - 1)
+ 184:                     changed = True
+ 185:                 continue
+ 186: 
+ 187:             update_audit_account_label(record.token, _audit_label(record))
+ 188:             args = _record_to_slot_args(record)
+ 189:             tags = args.pop("tags")
+ 190:             cooling_until_s = args.pop("cooling_until_s")
+ 191:             existing = table.idx_by_token.get(record.token)
+ 192: 
+ 193:             if existing is not None:
+ 194:                 old_tags = []
+ 195:                 # Collect old tags from tag_idx (reverse lookup).
+ 196:                 for tag, bucket in list(table.tag_idx.items()):
+ 197:                     if existing in bucket:
+ 198:                         old_tags.append(tag)
+ 199:                 table._update_slot(existing, **args, old_tags=old_tags, new_tags=tags)
+ 200:                 table.cooling_until_s_by_idx[existing] = cooling_until_s
+ 201:             else:
+ 202:                 idx = table._append_slot(record.token, **args, tags=tags)
+ 203:                 table.cooling_until_s_by_idx[idx] = cooling_until_s
+ 204: 
+ 205:             changed = True
+ 206: 
+ 207:         if changeset.has_more:
+ 208:             # �м�����ֻ�ƽ��������۲쵽����� revision��
+ 209:             # ������һ�� scan ��������δ���ص��м��У�S2 �޸�����
+ 210:             if changeset.batch_max_revision > table.revision:
+ 211:                 table.revision = changeset.batch_max_revision
+ 212:         else:
+ 213:             # ���һ������������ changeset.revision��db ��ǰȫ�� rev����
+ 214:             # �� table �ƽ���ȫ�� rev��ʹ�´� scan �����ظ�ɨ���Ѵ����С�
+ 215:             if changeset.revision > table.revision:
+ 216:                 table.revision = changeset.revision
+ 217:             break
+ 218: 
+ 219:     return changed
+ 220: 
+
+===== app/dataplane/account/selector.py:105-180 =====
+ 105:             table, pool_id,
+ 106:             exclude_idxs=exclude_idxs,
+ 107:             prefer_tag_idxs=prefer_tag_idxs,
+ 108:             now_s=now_s,
+ 109:         )
+ 110:     return _quota_select_any(
+ 111:         table, pool_id,
+ 112:         exclude_idxs=exclude_idxs,
+ 113:         prefer_tag_idxs=prefer_tag_idxs,
+ 114:         now_s=now_s,
+ 115:     )
+ 116: 
+ 117: 
+ 118: # ---------------------------------------------------------------------------
+ 119: # Strategy: quota �� score-based selection (unchanged behaviour)
+ 120: # ---------------------------------------------------------------------------
+ 121: 
+ 122: 
+ 123: def _quota_select(
+ 124:     table: AccountRuntimeTable,
+ 125:     pool_id: int,
+ 126:     mode_id: int,
+ 127:     *,
+ 128:     exclude_idxs: frozenset[int] | None,
+ 129:     prefer_tag_idxs: set[int] | None,
+ 130:     now_s: int,
+ 131: ) -> int | None:
+ 132:     candidates: set[int] | None = table.mode_available.get((pool_id, mode_id))
+ 133:     if not candidates:
+ 134:         return None
+ 135: 
+ 136:     reset_col  = table._reset_col(mode_id)
+ 137:     quota_col  = table._quota_col(mode_id)
+ 138:     total_col  = table._total_col(mode_id)
+ 139:     window_col = table._window_col(mode_id)
+ 140:     inflight_col = table.inflight_by_idx
+ 141:     cooling_col = table.cooling_until_s_by_idx
+ 142:     _maybe_reset_windows(
+ 143:         table, candidates, mode_id,
+ 144:         reset_col, quota_col, total_col, window_col,
+ 145:         pool_id, now_s,
+ 146:     )
+ 147: 
+ 148:     working: set[int] = candidates.copy()
+ 149:     if exclude_idxs:
+ 150:         working -= exclude_idxs
+ 151:     # B3: inflight Ӳ���޹��ˣ����ⵥ�˺Ŷѻ��������η��
+ 152:     working = {
+ 153:         idx for idx in working
+ 154:         if int(quota_col[idx]) > 0
+ 155:         and int(inflight_col[idx]) < _QUOTA_MAX_INFLIGHT
+ 156:         and int(cooling_col[idx]) <= now_s
+ 157:     }
+ 158:     if not working:
+ 159:         return None
+ 160: 
+ 161:     if prefer_tag_idxs:
+ 162:         preferred = working & prefer_tag_idxs
+ 163:         working = preferred if preferred else working
+ 164: 
+ 165:     return _best(table, working, quota_col, now_s)
+ 166: 
+ 167: 
+ 168: def _quota_select_any(
+ 169:     table: AccountRuntimeTable,
+ 170:     pool_id: int,
+ 171:     *,
+ 172:     exclude_idxs: frozenset[int] | None,
+ 173:     prefer_tag_idxs: set[int] | None,
+ 174:     now_s: int,
+ 175: ) -> int | None:
+ 176:     candidates: set[int] = _pool_union(table, pool_id)
+ 177:     if not candidates:
+ 178:         return None
+ 179: 
+ 180:     working = candidates.copy()
+
+===== app/dataplane/account/__init__.py:70-165 =====
+  70:                 logger.debug(
+  71:                     "account directory synced: revision={} size={}",
+  72:                     table.revision,
+  73:                     table.size,
+  74:                 )
+  75:             return changed
+  76: 
+  77:     # ------------------------------------------------------------------
+  78:     # Selection (hot path)
+  79:     # ------------------------------------------------------------------
+  80: 
+  81:     async def reserve(
+  82:         self,
+  83:         pool_candidates: tuple[int, ...] | int,
+  84:         mode_id: int,
+  85:         *,
+  86:         exclude_tokens: list[str] | None = None,
+  87:         prefer_tags: list[str] | None = None,
+  88:         now_s_override: int | None = None,
+  89:     ) -> AccountLease | None:
+  90:         """Select and reserve the best available account slot.
+  91: 
+  92:         ``pool_candidates`` is tried in order; the first pool with an available
+  93:         account wins. A plain ``int`` is accepted and wrapped into a tuple.
+  94: 
+  95:         Returns an AccountLease, or None if no account is available.
+  96:         """
+  97:         table = self._table
+  98:         if table is None:
+  99:             return None
+ 100: 
+ 101:         pools: tuple[int, ...] = (
+ 102:             (pool_candidates,) if isinstance(pool_candidates, int) else pool_candidates
+ 103:         )
+ 104:         ts = now_s_override if now_s_override is not None else now_s()
+ 105: 
+ 106:         # Resolve exclude set (O(n) once, before lock).
+ 107:         exclude_idxs: frozenset[int] | None = None
+ 108:         if exclude_tokens:
+ 109:             idxs = [
+ 110:                 table.idx_by_token[t] for t in exclude_tokens if t in table.idx_by_token
+ 111:             ]
+ 112:             if idxs:
+ 113:                 exclude_idxs = frozenset(idxs)
+ 114: 
+ 115:         # Resolve tag preference set.
+ 116:         prefer_tag_idxs: set[int] | None = None
+ 117:         if prefer_tags:
+ 118:             sets = [
+ 119:                 table.tag_idx.get(tag) for tag in prefer_tags if tag in table.tag_idx
+ 120:             ]
+ 121:             if sets:
+ 122:                 prefer_tag_idxs = set().union(*sets)
+ 123: 
+ 124:         async with self._lock:
+ 125:             idx: int | None = None
+ 126:             for pool_id in pools:
+ 127:                 idx = select(
+ 128:                     table,
+ 129:                     pool_id,
+ 130:                     mode_id,
+ 131:                     exclude_idxs=exclude_idxs,
+ 132:                     prefer_tag_idxs=prefer_tag_idxs,
+ 133:                     now_s=ts,
+ 134:                 )
+ 135:                 if idx is not None:
+ 136:                     break
+ 137: 
+ 138:             if idx is None:
+ 139:                 return None
+ 140: 
+ 141:             fb.increment_inflight(table, idx)
+ 142:             fb.update_last_use(table, idx, ts)
+ 143:             token = table.get_token(idx)
+ 144:             actual_pool = table.get_pool_id(idx)
+ 145: 
+ 146:         return new_lease(
+ 147:             idx=idx,
+ 148:             token=token,
+ 149:             pool_id=actual_pool,
+ 150:             mode_id=mode_id,
+ 151:             selected_at=ts,
+ 152:         )
+ 153: 
+ 154:     async def reserve_any(
+ 155:         self,
+ 156:         pool_candidates: tuple[int, ...] | int,
+ 157:         *,
+ 158:         exclude_tokens: list[str] | None = None,
+ 159:         prefer_tags: list[str] | None = None,
+ 160:         now_s_override: int | None = None,
+ 161:     ) -> AccountLease | None:
+ 162:         """Select any active account from pool_candidates without mode quota checking.
+ 163: 
+ 164:         Used for WebSocket-based operations that manage their own upstream rate limiting.
+ 165:         Returns an AccountLease with mode_id=-1 (no specific mode is tracked).
+
+===== app/products/openai/video.py:760-985 =====
+ 760:         async def _segment_progress(progress: int) -> None:
+ 761:             if progress_cb is None:
+ 762:                 return
+ 763:             scaled = int(
+ 764:                 ((index + (max(0, min(100, progress)) / 100.0)) / total_segments) * 100
+ 765:             )
+ 766:             await progress_cb(scaled)
+ 767: 
+ 768:         artifact = await _collect_video_segment(
+ 769:             token=token,
+ 770:             payload=payload,
+ 771:             referer=referer,
+ 772:             timeout_s=timeout_s,
+ 773:             progress_cb=_segment_progress if progress_cb is not None else None,
+ 774:         )
+ 775:         if index == 0 and total_segments > 1:
+ 776:             artifact.remixed_from_video_id = artifact.video_post_id or parent_post_id
+ 777:         extend_post_id = artifact.video_post_id or artifact.asset_id or parent_post_id
+ 778:         elapsed_seconds += segment_length
+ 779: 
+ 780:     if artifact is None:
+ 781:         raise UpstreamError("Video generation returned no artifact")
+ 782:     return artifact
+ 783: 
+ 784: 
+ 785: async def _run_video_generation(
+ 786:     *,
+ 787:     model: str,
+ 788:     prompt: str,
+ 789:     aspect_ratio: str,
+ 790:     resolution_name: str,
+ 791:     seconds: int,
+ 792:     preset: str = "custom",
+ 793:     input_references: list[dict[str, Any]] | None = None,
+ 794:     progress_cb: Callable[[int], Awaitable[None]] | None = None,
+ 795: ) -> _VideoArtifact:
+ 796:     async def _runner(token: str, timeout_s: float) -> _VideoArtifact:
+ 797:         return await _generate_video_with_token(
+ 798:             token=token,
+ 799:             prompt=prompt,
+ 800:             aspect_ratio=aspect_ratio,
+ 801:             resolution_name=resolution_name,
+ 802:             seconds=seconds,
+ 803:             preset=preset,
+ 804:             timeout_s=timeout_s,
+ 805:             input_references=input_references,
+ 806:             progress_cb=progress_cb,
+ 807:         )
+ 808: 
+ 809:     return await _run_video_with_account(model=model, runner=_runner)
+ 810: 
+ 811: 
+ 812: async def _run_video_with_account(
+ 813:     *,
+ 814:     model: str,
+ 815:     runner: Callable[[str, float], Awaitable[Any]],
+ 816: ) -> Any:
+ 817:     cfg = get_config()
+ 818:     timeout_s = cfg.get_float("video.timeout", 180.0)
+ 819:     spec = resolve_model(model)
+ 820:     if not spec.is_video():
+ 821:         raise ValidationError(f"Model {model!r} is not a video model", param="model")
+ 822: 
+ 823:     from app.dataplane.account import _directory as _acct_dir
+ 824: 
+ 825:     if _acct_dir is None:
+ 826:         raise RateLimitError("Account directory not initialised")
+ 827: 
+ 828:     acct = await _acct_dir.reserve(
+ 829:         pool_candidates=spec.pool_candidates(),
+ 830:         mode_id=int(spec.mode_id),
+ 831:         now_s_override=now_s(),
+ 832:     )
+ 833:     if acct is None:
+ 834:         raise RateLimitError("No available accounts for video generation")
+ 835: 
+ 836:     token = acct.token
+ 837:     success = False
+ 838:     fail_exc: BaseException | None = None
+ 839:     try:
+ 840:         artifact = await runner(token, timeout_s)
+ 841:         success = True
+ 842:         return artifact
+ 843:     except BaseException as exc:
+ 844:         fail_exc = exc
+ 845:         raise
+ 846:     finally:
+ 847:         await _acct_dir.release(acct)
+ 848:         kind = (
+ 849:             FeedbackKind.SUCCESS
+ 850:             if success
+ 851:             else _feedback_kind(fail_exc)
+ 852:             if fail_exc
+ 853:             else FeedbackKind.SERVER_ERROR
+ 854:         )
+ 855:         await _acct_dir.feedback(token, kind, int(spec.mode_id))
+ 856:         if success:
+ 857:             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
+ 858:         else:
+ 859:             asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+ 860: 
+ 861: 
+ 862: async def _put_video_job(job: _VideoJob) -> None:
+ 863:     async with _VIDEO_JOBS_LOCK:
+ 864:         _VIDEO_JOBS[job.id] = job
+ 865: 
+ 866: 
+ 867: async def get_video_job(video_id: str) -> _VideoJob | None:
+ 868:     async with _VIDEO_JOBS_LOCK:
+ 869:         return _VIDEO_JOBS.get(video_id)
+ 870: 
+ 871: 
+ 872: async def _expire_video_job(video_id: str, ttl_s: int = _VIDEO_JOB_TTL_S) -> None:
+ 873:     await asyncio.sleep(ttl_s)
+ 874:     async with _VIDEO_JOBS_LOCK:
+ 875:         _VIDEO_JOBS.pop(video_id, None)
+ 876: 
+ 877: 
+ 878: async def _set_job_status(
+ 879:     job: _VideoJob, *, status: str, progress: int | None = None
+ 880: ) -> None:
+ 881:     async with _VIDEO_JOBS_LOCK:
+ 882:         job.status = status
+ 883:         if progress is not None:
+ 884:             job.progress = max(0, min(100, progress))
+ 885: 
+ 886: 
+ 887: def _job_error_payload(message: str) -> dict[str, Any]:
+ 888:     return {"code": "video_generation_failed", "message": message}
+ 889: 
+ 890: 
+ 891: async def _run_video_job(
+ 892:     job: _VideoJob,
+ 893:     *,
+ 894:     size: str,
+ 895:     resolution_name: str | None,
+ 896:     prompt: str,
+ 897:     seconds: int,
+ 898:     preset: str | None,
+ 899:     input_references: list[dict[str, Any]] | None = None,
+ 900: ) -> None:
+ 901:     try:
+ 902:         await _set_job_status(job, status="in_progress", progress=1)
+ 903:         aspect_ratio, default_resolution_name = _resolve_video_size(size)
+ 904:         resolved_resolution_name = _resolve_video_resolution_name(
+ 905:             resolution_name,
+ 906:             default=default_resolution_name,
+ 907:         )
+ 908:         resolved_preset = _resolve_video_preset(preset)
+ 909:         spec = resolve_model(job.model)
+ 910: 
+ 911:         from app.dataplane.account import _directory as _acct_dir
+ 912: 
+ 913:         if _acct_dir is None:
+ 914:             raise RateLimitError("Account directory not initialised")
+ 915: 
+ 916:         acct = await _acct_dir.reserve(
+ 917:             pool_candidates=spec.pool_candidates(),
+ 918:             mode_id=int(spec.mode_id),
+ 919:             now_s_override=now_s(),
+ 920:         )
+ 921:         if acct is None:
+ 922:             raise RateLimitError("No available accounts for video generation")
+ 923: 
+ 924:         token = acct.token
+ 925:         success = False
+ 926:         fail_exc: BaseException | None = None
+ 927:         try:
+ 928:             cfg = get_config()
+ 929:             timeout_s = cfg.get_float("video.timeout", 180.0)
+ 930: 
+ 931:             async def _progress(progress: int) -> None:
+ 932:                 await _set_job_status(
+ 933:                     job, status="in_progress", progress=max(1, progress)
+ 934:                 )
+ 935: 
+ 936:             artifact = await _generate_video_with_token(
+ 937:                 token=token,
+ 938:                 prompt=prompt,
+ 939:                 aspect_ratio=aspect_ratio,
+ 940:                 resolution_name=resolved_resolution_name,
+ 941:                 seconds=seconds,
+ 942:                 preset=resolved_preset,
+ 943:                 timeout_s=timeout_s,
+ 944:                 input_references=input_references,
+ 945:                 progress_cb=_progress,
+ 946:             )
+ 947:             raw, _mime = await _download_video_bytes(token, artifact.video_url)
+ 948:             success = True
+ 949:         except BaseException as exc:
+ 950:             fail_exc = exc
+ 951:             raise
+ 952:         finally:
+ 953:             await _acct_dir.release(acct)
+ 954:             kind = (
+ 955:                 FeedbackKind.SUCCESS
+ 956:                 if success
+ 957:                 else _feedback_kind(fail_exc)
+ 958:                 if fail_exc
+ 959:                 else FeedbackKind.SERVER_ERROR
+ 960:             )
+ 961:             await _acct_dir.feedback(token, kind, int(spec.mode_id))
+ 962:             if success:
+ 963:                 asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
+ 964:             else:
+ 965:                 asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+ 966: 
+ 967:         path = _save_video_bytes(raw, job.id)
+ 968:         async with _VIDEO_JOBS_LOCK:
+ 969:             job.status = "completed"
+ 970:             job.progress = 100
+ 971:             job.completed_at = int(time.time())
+ 972:             job.video_url = artifact.video_url
+ 973:             job.content_path = str(path)
+ 974:             job.remixed_from_video_id = artifact.remixed_from_video_id
+ 975:     except Exception as exc:
+ 976:         logger.exception("video job failed: job_id={} error={}", job.id, exc)
+ 977:         async with _VIDEO_JOBS_LOCK:
+ 978:             job.status = "failed"
+ 979:             job.error = _job_error_payload(_exception_message(exc))
+ 980: 
+ 981: 
+ 982: async def create_video(
+ 983:     *,
+ 984:     model: str,
+ 985:     prompt: str,

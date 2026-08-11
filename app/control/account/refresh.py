@@ -52,6 +52,7 @@ _MODE_KEYS = {
     3: "quota_heavy",
     4: "quota_grok_4_3",
     5: "quota_console",  # console.x.ai 独立配额
+    7: "quota_video",    # Grok Imagine Video 独立媒体额度
 }
 
 
@@ -199,6 +200,10 @@ class AccountRefreshService:
             )
             return None
         try:
+            if mode_id == 7:
+                from app.dataplane.reverse.protocol.xai_media_quota import fetch_video_quota
+
+                return await fetch_video_quota(token)
             from app.dataplane.reverse.protocol.xai_usage import fetch_mode_quota
 
             return await fetch_mode_quota(token, mode_id)
@@ -236,29 +241,45 @@ class AccountRefreshService:
             agg.merge(r)
         return agg
 
-    async def refresh_call_async(self, token: str, mode_id: int) -> None:
-        """Fire-and-forget single-mode quota sync after a successful call."""
+    async def refresh_mode_quota_async(
+        self,
+        token: str,
+        mode_id: int,
+        *,
+        is_use: bool = False,
+    ) -> QuotaWindow | None:
+        """Synchronise one mode and return its live window.
+
+        ``is_use=False`` is for preflight checks.  It persists the upstream
+        result but never consumes a local quota entry, which is essential for
+        free video credits where the actual balance is exposed by a separate
+        media endpoint.
+        """
         record = (await self._repo.get_accounts([token]) or [None])[0]
         if record is None or record.is_deleted():
-            return
+            return None
 
-        # mode_id=5 (CONSOLE) 是本地管理的配额，不需要请求 xai usage API
-        # 直接做本地扣减并更新 usage_use_count
+        # Console is locally managed; it has no upstream quota query.
         if mode_id == 5:
             await self._apply_single_mode(
-                record, mode_id, window=None, is_use=True, use_at_ms=now_ms()
+                record, mode_id, window=None, is_use=is_use, use_at_ms=now_ms() if is_use else None
             )
-            return
+            return record.quota_set().get(mode_id)
 
         try:
             window = await self._fetch_mode_quota(token, record.pool, mode_id)
         except UpstreamError as exc:
             if await self._expire_invalid_credentials(record, exc):
-                return
+                return None
             raise
         await self._apply_single_mode(
-            record, mode_id, window, is_use=True, use_at_ms=now_ms()
+            record, mode_id, window, is_use=is_use, use_at_ms=now_ms() if is_use else None
         )
+        return window
+
+    async def refresh_call_async(self, token: str, mode_id: int) -> None:
+        """Fire-and-forget single-mode quota sync after a successful call."""
+        await self.refresh_mode_quota_async(token, mode_id, is_use=True)
 
     async def refresh_scheduled(self, pool: str | None = None) -> RefreshResult:
         """Periodic refresh — fetch real quotas for all (or one pool's) accounts.
@@ -543,6 +564,39 @@ class AccountRefreshService:
                     now = now_ms()
                     quota_patch: dict[str, dict] = {}
                     window = record.quota_set().get(mode_id)
+                    # Video is a separate media credit. A video 429 must only
+                    # exhaust video selection; it must not cool chat/image/console.
+                    if mode_id == 7:
+                        reset_at = (
+                            window.reset_at
+                            if window is not None and window.reset_at is not None and window.reset_at > now
+                            else now + max(window.window_seconds if window is not None else 86_400, 1) * 1000
+                        )
+                        if window is not None:
+                            quota_patch[_MODE_KEYS[mode_id]] = QuotaWindow(
+                                remaining=0,
+                                total=max(1, window.total),
+                                window_seconds=max(1, window.window_seconds),
+                                reset_at=reset_at,
+                                synced_at=window.synced_at,
+                                source=QuotaSource.ESTIMATED,
+                            ).to_dict()
+                        await self._repo.patch_accounts(
+                            [
+                                AccountPatch(
+                                    token=token,
+                                    usage_fail_delta=1,
+                                    last_fail_at=now,
+                                    last_fail_reason="video_rate_limited",
+                                    **quota_patch,
+                                )
+                            ]
+                        )
+                        logger.info(
+                            "video quota exhausted after 429: token={}... reset_at={}",
+                            token[:10], reset_at,
+                        )
+                        return
                     cooldown_until = now + _rate_limit_cooling_sec(record.pool, mode_id) * 1000
                     ext_data = dict(record.ext or {})
                     extra_patch: dict = {

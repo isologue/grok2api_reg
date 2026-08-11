@@ -46,11 +46,17 @@ BASIC_FAST_WINDOW_SECONDS = 86_400
 BASIC_CONSOLE_LIMIT = 20
 BASIC_CONSOLE_WINDOW_SECONDS = 3600
 
+# Grok 网页端免费号赠送的视频额度实际由 /rest/media/imagine/quota_info 决定。
+# 默认值只用于让历史账号首次进入候选池；调用前会同步上游真实额度。
+VIDEO_LIMIT = 1
+VIDEO_WINDOW_SECONDS = 86_400
+
 BASIC_QUOTA_DEFAULTS = AccountQuotaSet(
     auto=_w(0, 0, 0),  # unsupported on basic accounts
     fast=_w(BASIC_FAST_LIMIT, BASIC_FAST_LIMIT, BASIC_FAST_WINDOW_SECONDS),
     expert=_w(0, 0, 0),  # unsupported on basic accounts
     console=_w(BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS),
+    video=_w(VIDEO_LIMIT, VIDEO_LIMIT, VIDEO_WINDOW_SECONDS),
 )
 
 SUPER_QUOTA_DEFAULTS = AccountQuotaSet(
@@ -58,6 +64,7 @@ SUPER_QUOTA_DEFAULTS = AccountQuotaSet(
     fast=_w(140, 140, 7_200),  # 140 queries / 2 h
     expert=_w(50, 50, 7_200),  # 50  queries / 2 h
     grok_4_3=_w(50, 50, 7_200),  # 50  queries / 2 h
+    video=_w(VIDEO_LIMIT, VIDEO_LIMIT, VIDEO_WINDOW_SECONDS),
 )
 
 HEAVY_QUOTA_DEFAULTS = AccountQuotaSet(
@@ -66,6 +73,7 @@ HEAVY_QUOTA_DEFAULTS = AccountQuotaSet(
     expert=_w(150, 150, 7_200),  # 150 queries / 2 h
     heavy=_w(20, 20, 7_200),  # 20  queries / 2 h
     grok_4_3=_w(150, 150, 7_200),  # 150 queries / 2 h
+    video=_w(VIDEO_LIMIT, VIDEO_LIMIT, VIDEO_WINDOW_SECONDS),
 )
 
 # Map pool name → defaults object (used by backends on upsert).
@@ -76,9 +84,9 @@ _POOL_DEFAULTS: dict[str, AccountQuotaSet] = {
 }
 
 _SUPPORTED_MODE_IDS_BY_POOL: dict[str, frozenset[int]] = {
-    "basic": frozenset((1, 5)),
-    "super": frozenset((0, 1, 2, 4, 5)),
-    "heavy": frozenset((0, 1, 2, 3, 4, 5)),
+    "basic": frozenset((1, 5, 7)),
+    "super": frozenset((0, 1, 2, 4, 5, 7)),
+    "heavy": frozenset((0, 1, 2, 3, 4, 5, 7)),
 }
 
 # ---------------------------------------------------------------------------
@@ -110,6 +118,8 @@ def default_quota_set(pool: str) -> AccountQuotaSet:
         qs.console = _w(
             src.console.remaining, src.console.total, src.console.window_seconds
         )
+    if src.video is not None:
+        qs.video = _w(src.video.remaining, src.video.total, src.video.window_seconds)
     return qs
 
 
@@ -176,6 +186,7 @@ def normalize_quota_set(pool: str, quota_set: AccountQuotaSet) -> AccountQuotaSe
     qs.heavy = normalize_quota_window(pool, 3, quota_set.heavy)
     qs.grok_4_3 = normalize_quota_window(pool, 4, quota_set.grok_4_3)
     qs.console = normalize_quota_window(pool, 5, quota_set.console) or defaults.console
+    qs.video = normalize_quota_window(pool, 7, quota_set.video) or defaults.video
     return qs
 
 

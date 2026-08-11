@@ -66,6 +66,7 @@ class RedisAccountRepository:
             "quota_heavy":      json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
             "quota_grok_4_3":   json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
             "quota_console":    json.dumps(qs.console.to_dict()) if qs.console else "{}",
+            "quota_video":      json.dumps(qs.video.to_dict()) if qs.video else "{}",
             "usage_use_count":  str(record.usage_use_count),
             "usage_fail_count": str(record.usage_fail_count),
             "usage_sync_count": str(record.usage_sync_count),
@@ -110,6 +111,9 @@ class RedisAccountRepository:
                 **({
                     "console": json.loads(_s("quota_console"))
                 } if _s("quota_console") and _s("quota_console") != "{}" else {}),
+                **({
+                    "video": json.loads(_s("quota_video"))
+                } if _s("quota_video") and _s("quota_video") != "{}" else {}),
             },
             "usage_use_count":  int(_s("usage_use_count")  or 0),
             "usage_fail_count": int(_s("usage_fail_count") or 0),
@@ -301,6 +305,8 @@ class RedisAccountRepository:
                 updates["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
             if patch.quota_console is not None:
                 updates["quota_console"] = json.dumps(patch.quota_console)
+            if patch.quota_video is not None:
+                updates["quota_video"] = json.dumps(patch.quota_video)
 
             # Usage counters.
             if patch.usage_use_delta is not None:

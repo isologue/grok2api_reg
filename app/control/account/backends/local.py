@@ -28,6 +28,7 @@ _TOKEN_PAYLOAD_QUOTAS = (
     ("heavy",     "quota_heavy",     False),
     ("grok_4_3",  "quota_grok_4_3",  False),  # 补上，避免 super/heavy 账号余额显示为空
     ("console",   "quota_console",   True),
+    ("video",     "quota_video",     True),
 )
 
 
@@ -79,6 +80,7 @@ class LocalAccountRepository:
                     quota_heavy        TEXT    NOT NULL DEFAULT '{{}}',
                     quota_grok_4_3     TEXT    NOT NULL DEFAULT '{{}}',
                     quota_console      TEXT    NOT NULL DEFAULT '{{}}',
+                    quota_video        TEXT    NOT NULL DEFAULT '{{}}',
                     usage_use_count    INTEGER NOT NULL DEFAULT 0,
                     usage_fail_count   INTEGER NOT NULL DEFAULT 0,
                     usage_sync_count   INTEGER NOT NULL DEFAULT 0,
@@ -103,6 +105,7 @@ class LocalAccountRepository:
             """)
             self._ensure_column_sync(conn, "quota_grok_4_3", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column_sync(conn, "quota_console", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column_sync(conn, "quota_video", "TEXT NOT NULL DEFAULT '{}'")
             conn.commit()
 
     @staticmethod
@@ -133,9 +136,11 @@ class LocalAccountRepository:
         heavy_raw     = d.pop("quota_heavy",     "{}") or "{}"
         grok_4_3_raw  = d.pop("quota_grok_4_3",  "{}") or "{}"
         console_raw   = d.pop("quota_console",   "{}") or "{}"
+        video_raw     = d.pop("quota_video",     "{}") or "{}"
         heavy_dict    = json.loads(heavy_raw)
         grok_4_3_dict = json.loads(grok_4_3_raw)
         console_dict  = json.loads(console_raw)
+        video_dict    = json.loads(video_raw)
         d["quota"] = {
             "auto":   json.loads(d.pop("quota_auto",   "{}") or "{}"),
             "fast":   json.loads(d.pop("quota_fast",   "{}") or "{}"),
@@ -143,6 +148,7 @@ class LocalAccountRepository:
             **({"heavy":    heavy_dict}    if heavy_dict    else {}),
             **({"grok_4_3": grok_4_3_dict} if grok_4_3_dict else {}),
             **({"console":  console_dict}  if console_dict  else {}),
+            **({"video":    video_dict}    if video_dict    else {}),
         }
         d["ext"] = json.loads(d.get("ext") or "{}")
         return AccountRecord.model_validate(d)
@@ -163,6 +169,7 @@ class LocalAccountRepository:
             "quota_heavy":      json.dumps(qs.heavy.to_dict())    if qs.heavy    else "{}",
             "quota_grok_4_3":   json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
             "quota_console":    json.dumps(qs.console.to_dict())   if qs.console  else "{}",
+            "quota_video":      json.dumps(qs.video.to_dict())     if qs.video    else "{}",
             "usage_use_count":  record.usage_use_count,
             "usage_fail_count": record.usage_fail_count,
             "usage_sync_count": record.usage_sync_count,
@@ -236,6 +243,7 @@ class LocalAccountRepository:
                 "qh": json.dumps(qs.heavy.to_dict())    if qs.heavy    else "{}",
                 "qg": json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
                 "qc": json.dumps(qs.console.to_dict())  if qs.console  else "{}",
+                "qv": json.dumps(qs.video.to_dict())    if qs.video    else "{}",
             }
             _quota_json_cache[pool] = result
             return result
@@ -255,7 +263,7 @@ class LocalAccountRepository:
             rows.append((
                 token, pool, ts, ts,
                 json.dumps(item.tags),
-                q["qa"], q["qf"], q["qe"], q["qh"], q["qg"], q["qc"],
+                q["qa"], q["qf"], q["qe"], q["qh"], q["qg"], q["qc"], q["qv"],
                 json.dumps(item.ext),
                 revision,
             ))
@@ -268,12 +276,12 @@ class LocalAccountRepository:
             f"""
             INSERT INTO {_TBL} (
                 token, pool, status, created_at, updated_at,
-                tags, quota_auto, quota_fast, quota_expert, quota_heavy, quota_grok_4_3, quota_console,
+                tags, quota_auto, quota_fast, quota_expert, quota_heavy, quota_grok_4_3, quota_console, quota_video,
                 usage_use_count, usage_fail_count, usage_sync_count,
                 ext, revision
             ) VALUES (
                 ?, ?, 'active', ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?,
                 0, 0, 0, ?, ?
             )
             ON CONFLICT(token) DO UPDATE SET
@@ -283,6 +291,7 @@ class LocalAccountRepository:
                 updated_at     = excluded.updated_at,
                 tags           = excluded.tags,
                 quota_console  = excluded.quota_console,
+                quota_video    = excluded.quota_video,
                 ext            = CASE
                     WHEN excluded.ext = '{{}}' THEN ext
                     WHEN ext = '{{}}' THEN excluded.ext
@@ -352,6 +361,8 @@ class LocalAccountRepository:
                 sets["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
             if patch.quota_console is not None:
                 sets["quota_console"] = json.dumps(patch.quota_console)
+            if patch.quota_video is not None:
+                sets["quota_video"] = json.dumps(patch.quota_video)
 
             # Tags — use set arithmetic to avoid O(n×m) membership tests.
             tag_set: set[str] = set(record.tags)

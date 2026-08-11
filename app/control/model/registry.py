@@ -53,7 +53,8 @@ MODELS: tuple[ModelSpec, ...] = (
     # === Video ==============================================================
 
     # Super+
-    ModelSpec("grok-imagine-video",                     ModeId.AUTO,     Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
+    # 免费普通号也有独立视频赠送额度；ModeId.VIDEO 不与聊天 AUTO 配额混用。
+    ModelSpec("grok-imagine-video",                     ModeId.VIDEO,    Tier.BASIC, Capability.VIDEO,      True, "Grok Imagine Video"),
 
     # === Grok Build (CLI OAuth / CPA Auth) =================================
     # OAuth-backed Grok Build models imported from CPA Auth.

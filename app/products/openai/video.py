@@ -75,6 +75,9 @@ _VIDEO_SIZE_MAP: dict[str, tuple[str, str]] = {
     "1024x1024": ("1:1", "720p"),
     "1024x1792": ("9:16", "720p"),
     "1792x1024": ("16:9", "720p"),
+    # Grok web free-video flow uses 480p / 6 seconds with a 2:3 frame.
+    "480x720": ("2:3", "480p"),
+    "720x480": ("3:2", "480p"),
 }
 _PRESET_FLAGS = {
     "fun": "--mode=extremely-crazy",
@@ -694,6 +697,37 @@ async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
     return local_url if fmt == "local_url" else _render_video_html(local_url)
 
 
+def _free_text_to_video_payload(
+    *,
+    prompt: str,
+    aspect_ratio: str,
+    resolution_name: str,
+    seconds: int,
+    preset: str,
+) -> dict[str, Any]:
+    """Payload used by Grok's current free 480p / 6-second web flow."""
+    return {
+        "modelName": _VIDEO_MODEL_NAME,
+        "message": _build_message(prompt, preset),
+        "enableImageStreaming": True,
+        "enableSideBySide": True,
+        "sendFinalMetadata": True,
+        "responseMetadata": {
+            "experiments": [],
+            "modelConfigOverride": {"modelMap": {}},
+        },
+        "mediaGenInput": {
+            "textToVideo": {
+                "prompt": prompt,
+                "aspectRatio": aspect_ratio,
+                "duration": seconds,
+                "resolutionName": resolution_name,
+            }
+        },
+        "kind": "CONVERSATION_KIND_IMAGINE",
+    }
+
+
 async def _generate_video_with_token(
     *,
     token: str,
@@ -706,6 +740,25 @@ async def _generate_video_with_token(
     input_references: list[dict[str, Any]] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
+    # The current Grok web client grants ordinary free accounts a separate
+    # 480p/6s text-to-video credit. It posts directly to app-chat instead of
+    # creating a media parent post. Keep the legacy flow for image-to-video,
+    # extensions, 720p, and longer clips.
+    if not input_references and resolution_name == "480p" and seconds == 6:
+        return await _collect_video_segment(
+            token=token,
+            payload=_free_text_to_video_payload(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                resolution_name=resolution_name,
+                seconds=seconds,
+                preset=preset,
+            ),
+            referer="https://grok.com/imagine",
+            timeout_s=timeout_s,
+            progress_cb=progress_cb,
+        )
+
     references: list[_VideoReference] = []
     if input_references:
         references = await _prepare_video_references(token, input_references)
@@ -809,6 +862,68 @@ async def _run_video_generation(
     return await _run_video_with_account(model=model, runner=_runner)
 
 
+async def _reserve_video_account(spec):
+    """Reserve an account whose real media quota still allows one video.
+
+    Runtime defaults let legacy records participate in initial selection, but
+    the authoritative balance for free video is ``/media/imagine/quota_info``.
+    Exhausted accounts are released and excluded for this request so we can
+    immediately try another normal account without consuming chat/image quota.
+    """
+    from app.control.account.runtime import get_refresh_service
+    from app.dataplane.account import _directory as _acct_dir
+    from app.products._account_selection import selection_max_retries
+
+    if _acct_dir is None:
+        raise RateLimitError("Account directory not initialised")
+
+    excluded: list[str] = []
+    attempts = selection_max_retries() + 1
+    for attempt in range(1, attempts + 1):
+        lease = await _acct_dir.reserve(
+            pool_candidates=spec.pool_candidates(),
+            mode_id=int(spec.mode_id),
+            exclude_tokens=excluded or None,
+            now_s_override=now_s(),
+        )
+        if lease is None:
+            break
+        token = lease.token
+        release_lease = True
+        try:
+            service = get_refresh_service()
+            window = (
+                await service.refresh_mode_quota_async(token, int(spec.mode_id), is_use=False)
+                if service is not None
+                else None
+            )
+            # A failed quota probe is non-authoritative (network/proxy hiccup),
+            # so retain the account. A known zero is authoritative and safe to
+            # skip before submitting an expensive upstream video request.
+            if window is not None and window.remaining <= 0:
+                excluded.append(token)
+                logger.info(
+                    "视频账号额度不足，已跳过：token={}... attempt={}/{} reset_at={}",
+                    token[:10], attempt, attempts, window.reset_at,
+                )
+                continue
+            release_lease = False
+            return lease
+        except Exception as exc:
+            # Invalid credentials are already persisted by the refresh service.
+            # Do not let a preflight connectivity failure turn into a false
+            # "no available accounts" result; the actual video request can
+            # still provide the more precise upstream error.
+            logger.debug("视频账号额度预检异常，继续尝试当前账号：token={}... error={}", token[:10], exc)
+            release_lease = False
+            return lease
+        finally:
+            if release_lease:
+                await _acct_dir.release(lease)
+
+    raise RateLimitError("No available accounts with video quota")
+
+
 async def _run_video_with_account(
     *,
     model: str,
@@ -825,14 +940,7 @@ async def _run_video_with_account(
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
-    acct = await _acct_dir.reserve(
-        pool_candidates=spec.pool_candidates(),
-        mode_id=int(spec.mode_id),
-        now_s_override=now_s(),
-    )
-    if acct is None:
-        raise RateLimitError("No available accounts for video generation")
-
+    acct = await _reserve_video_account(spec)
     token = acct.token
     success = False
     fail_exc: BaseException | None = None
@@ -913,14 +1021,7 @@ async def _run_video_job(
         if _acct_dir is None:
             raise RateLimitError("Account directory not initialised")
 
-        acct = await _acct_dir.reserve(
-            pool_candidates=spec.pool_candidates(),
-            mode_id=int(spec.mode_id),
-            now_s_override=now_s(),
-        )
-        if acct is None:
-            raise RateLimitError("No available accounts for video generation")
-
+        acct = await _reserve_video_account(spec)
         token = acct.token
         success = False
         fail_exc: BaseException | None = None
@@ -999,7 +1100,10 @@ async def create_video(
 
     normalized_seconds = _coerce_seconds(seconds)
     validate_video_length(normalized_seconds)
-    normalized_size = (size or "720x1280").strip()
+    # Match the browser's free video shape when callers request 480p but do
+    # not provide an explicit size.
+    default_size = "480x720" if (resolution_name or "").strip().lower() == "480p" else "720x1280"
+    normalized_size = (size or default_size).strip()
     _aspect_ratio, default_resolution_name = _resolve_video_size(normalized_size)
     _resolve_video_resolution_name(resolution_name, default=default_resolution_name)
     _resolve_video_preset(preset)
@@ -1118,6 +1222,8 @@ async def completions(
 ) -> dict | AsyncGenerator[str, None]:
     """Chat-completions video support on top of the same core flow."""
     validate_video_length(seconds)
+    if resolution_name and resolution_name.strip().lower() == "480p" and size == "720x1280":
+        size = "480x720"
     aspect_ratio, default_resolution_name = _resolve_video_size(size)
     resolved_resolution_name = _resolve_video_resolution_name(
         resolution_name,

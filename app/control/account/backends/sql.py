@@ -48,6 +48,7 @@ accounts_table = sa.Table(
     sa.Column("quota_heavy",      sa.Text,    nullable=False, default="{}"),
     sa.Column("quota_grok_4_3",   sa.Text,    nullable=False, default="{}"),
     sa.Column("quota_console",    sa.Text,    nullable=False, default="{}"),
+    sa.Column("quota_video",      sa.Text,    nullable=False, default="{}"),
     sa.Column("usage_use_count",  sa.Integer, nullable=False, default=0),
     sa.Column("usage_fail_count", sa.Integer, nullable=False, default=0),
     sa.Column("usage_sync_count", sa.Integer, nullable=False, default=0),
@@ -409,9 +410,11 @@ def _row_to_record(row: Any) -> AccountRecord:
     heavy_raw     = d.pop("quota_heavy",    "{}") or "{}"
     grok_4_3_raw  = d.pop("quota_grok_4_3", "{}") or "{}"
     console_raw   = d.pop("quota_console",  "{}") or "{}"
+    video_raw     = d.pop("quota_video",    "{}") or "{}"
     heavy_dict    = json.loads(heavy_raw)
     grok_4_3_dict = json.loads(grok_4_3_raw)
     console_dict  = json.loads(console_raw)
+    video_dict    = json.loads(video_raw)
     d["quota"] = {
         "auto":   json.loads(d.pop("quota_auto",   "{}") or "{}"),
         "fast":   json.loads(d.pop("quota_fast",   "{}") or "{}"),
@@ -419,6 +422,7 @@ def _row_to_record(row: Any) -> AccountRecord:
         **({"heavy":    heavy_dict}    if heavy_dict    else {}),
         **({"grok_4_3": grok_4_3_dict} if grok_4_3_dict else {}),
         **({"console":  console_dict}  if console_dict  else {}),
+        **({"video":    video_dict}    if video_dict    else {}),
     }
     d["ext"] = json.loads(d.get("ext") or "{}")
     return AccountRecord.model_validate(d)
@@ -546,6 +550,23 @@ class SqlAccountRepository:
                     f"ALTER TABLE {_TBL_ACCOUNTS} "
                     f"ADD COLUMN quota_grok_4_3 TEXT NOT NULL DEFAULT '{{}}'"
                 )
+        if "quota_video" not in existing:
+            if self._dialect == "mysql":
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} ADD COLUMN quota_video TEXT"
+                )
+                await conn.exec_driver_sql(
+                    f"UPDATE {_TBL_ACCOUNTS} SET quota_video = '{{}}' "
+                    f"WHERE quota_video IS NULL"
+                )
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} MODIFY COLUMN quota_video TEXT NOT NULL"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"ADD COLUMN quota_video TEXT NOT NULL DEFAULT '{{}}'"
+                )
         if "quota_console" not in existing:
             if self._dialect == "mysql":
                 await conn.exec_driver_sql(
@@ -669,6 +690,7 @@ class SqlAccountRepository:
                     "quota_heavy":      json.dumps(qs.heavy.to_dict())    if qs.heavy    else "{}",
                     "quota_grok_4_3":   json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
                     "quota_console":    json.dumps(qs.console.to_dict())   if qs.console  else "{}",
+                    "quota_video":      json.dumps(qs.video.to_dict())     if qs.video    else "{}",
                     "usage_use_count":  0,
                     "usage_fail_count": 0,
                     "usage_sync_count": 0,
@@ -733,6 +755,8 @@ class SqlAccountRepository:
                     updates["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
                 if patch.quota_console is not None:
                     updates["quota_console"] = json.dumps(patch.quota_console)
+                if patch.quota_video is not None:
+                    updates["quota_video"] = json.dumps(patch.quota_video)
                 # S3 修复：数值列使用原子表达式 GREATEST(0, col+delta)，
                 # 而不是基于 SELECT 出的旧值在 Python 中算新值。
                 # GREATEST 在 MySQL/PostgreSQL 上均原生支持。

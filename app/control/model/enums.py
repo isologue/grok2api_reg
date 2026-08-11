@@ -16,6 +16,7 @@ class ModeId(IntEnum):
     GROK_4_3 = 4  # modeId="grok-420-computer-use-sa" — super/heavy only
     CONSOLE = 5  # console.x.ai 独立配额 — basic pool console 模型专用
     BUILD = 6  # cli-chat-proxy.grok.com OAuth (CPA Auth)
+    VIDEO = 7  # Grok Imagine Video 独立媒体额度
 
     def to_api_str(self) -> str:
         _OVERRIDES: dict[int, str] = {
