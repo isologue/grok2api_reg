@@ -74,6 +74,41 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in messages], ["right", "legacy"])
         provider.close()
 
+    def test_nested_message_list_and_raw_mime_content_are_supported(self) -> None:
+        provider = CloudflareTempMailProvider({
+            "type": "cloudflare_temp_email",
+            "api_base": "https://mail.example.test",
+            "admin_password": "admin-secret",
+            "domains": ["example.test"],
+        })
+        provider._request = Mock(return_value={"data": {"messages": [{
+            "msgid": "message-from-msgid",
+            # ``address`` may be a sender-like value in deployed CF services;
+            # it must not reject the mailbox-scoped JWT result.
+            "address": "noreply@accounts.x.ai",
+            "raw": "From: xAI <noreply@accounts.x.ai>\nTo: new@example.test\nSubject: Verify\nContent-Type: text/plain; charset=utf-8\n\nYour code is 123456",
+        }]}})
+        messages = provider.list_messages("new@example.test", "mailbox-jwt")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["id"], "message-from-msgid")
+        self.assertEqual(extract_verification_code(messages[0]["content"]), "123456")
+        provider.close()
+
+    def test_hydra_member_and_message_id_are_supported(self) -> None:
+        provider = CloudflareTempMailProvider({
+            "type": "cloudflare_temp_email",
+            "api_base": "https://mail.example.test",
+            "admin_password": "admin-secret",
+            "domains": ["example.test"],
+        })
+        provider._request = Mock(return_value={"hydra:member": [{
+            "messageId": "message-id-camelcase", "html": "<p>Use ABC-123</p>",
+        }]})
+        messages = provider.list_messages("new@example.test", "mailbox-jwt")
+        self.assertEqual(messages[0]["id"], "message-id-camelcase")
+        self.assertEqual(extract_verification_code(messages[0]["content"]), "ABC-123")
+        provider.close()
+
 
 class TempMailLolProviderTests(unittest.TestCase):
     def test_create_and_read_inbox_with_provider_token(self) -> None:
@@ -125,6 +160,14 @@ class TempMailLolProviderTests(unittest.TestCase):
         content = "<style>.email { TEXT-SIZE: 14px; }</style><p>Your code is ABC-123</p>"
         self.assertEqual(extract_verification_code(content), "ABC-123")
         self.assertIsNone(extract_verification_code("<style>.email { TEXT-SIZE: 14px; }</style>"))
+
+    def test_xai_hyphenated_code_is_found_when_html_text_is_concatenated(self) -> None:
+        content = (
+            "Validate your email Hi, Thank you for creating a SpaceXAI account. "
+            "Please use the code below to validate your email address. "
+            "L3K-YY9If you did not create a new account, please ignore this email."
+        )
+        self.assertEqual(extract_verification_code(content), "L3K-YY9")
 
 
 class OutlookCompatibilityTests(unittest.TestCase):

@@ -5,7 +5,7 @@ import imaplib
 import json
 import random
 import threading
-from email import message_from_bytes, policy
+from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from datetime import UTC, datetime
@@ -146,12 +146,12 @@ def _cloudflare_domains(entry: dict[str, Any]) -> list[str]:
 
 
 def _cloudflare_message_text(value: Any) -> str:
-    """Flatten the common Cloudflare 临时邮箱 body shapes to searchable text."""
+    """Flatten common Cloudflare inbox body shapes to searchable text."""
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
         parts: list[str] = []
-        for key in ("text", "text_content", "body", "content", "html", "html_content", "html_body"):
+        for key in ("text", "text_content", "body", "content", "html", "html_content", "html_body", "body_html"):
             if key in value:
                 part = _cloudflare_message_text(value.get(key))
                 if part:
@@ -162,6 +162,62 @@ def _cloudflare_message_text(value: Any) -> str:
     if isinstance(value, list):
         return "\n".join(_cloudflare_message_text(part) for part in value if part)
     return str(value or "")
+
+
+def _cloudflare_extract_message_content(item: dict[str, Any]) -> tuple[str, str]:
+    """Return text/html content, including deployments that expose RFC822 in ``raw``."""
+    text_content = _cloudflare_message_text(
+        item.get("text_content") or item.get("text") or item.get("body") or item.get("content") or ""
+    ).strip()
+    html_content = _cloudflare_message_text(
+        item.get("html_content") or item.get("html") or item.get("html_body") or item.get("body_html") or ""
+    ).strip()
+    if text_content or html_content:
+        return text_content, html_content
+
+    raw = item.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return "", ""
+    try:
+        parsed = message_from_string(raw, policy=policy.default)
+    except Exception:
+        # Some older deployments return a plain, non-MIME raw body.
+        return raw, ""
+
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+    for part in parsed.walk() if parsed.is_multipart() else [parsed]:
+        if part.get_content_maintype() == "multipart":
+            continue
+        try:
+            payload = part.get_content()
+        except Exception:
+            payload = ""
+        if not payload:
+            continue
+        if part.get_content_type() == "text/html":
+            html_parts.append(str(payload))
+        else:
+            plain_parts.append(str(payload))
+    return "\n".join(plain_parts).strip(), "\n".join(html_parts).strip()
+
+
+def _cloudflare_message_list_payload(data: Any) -> list[Any]:
+    """Accept the response wrappers used by Cloudflare Temp Email variants."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("results", "hydra:member", "messages", "mails", "emails", "data"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for nested_key in ("results", "hydra:member", "messages", "mails", "emails", "data"):
+                nested = value.get(nested_key)
+                if isinstance(nested, list):
+                    return nested
+    return []
 
 
 def _cloudflare_text_candidates(value: Any) -> list[str]:
@@ -183,21 +239,19 @@ def _cloudflare_text_candidates(value: Any) -> list[str]:
 
 
 def _cloudflare_message_matches_address(item: dict[str, Any], address: str) -> bool:
-    """Avoid accepting a stale/shared-inbox message for another address.
+    """Reject only explicitly addressed messages for a different recipient.
 
-    The JWT normally scopes ``/api/mails`` to one mailbox, but some deployments
-    return a shared result list.  If recipient metadata is present, require it
-    to contain the allocated address; if it is absent, keep the message for
-    compatibility with older Cloudflare 临时邮箱 deployments.
+    A mailbox JWT normally already scopes ``/api/mails`` to one mailbox.  Fields
+    named ``address``/``email`` are ambiguous across service versions (they are
+    often the sender), so they must never be used for recipient filtering.
     """
     target = str(address or "").strip().lower()
     if not target:
         return True
     candidates: list[str] = []
     for key in (
-        "to", "toEmail", "mailTo", "receiver", "receivers", "address",
-        "email", "envelope_to", "delivered_to", "x_forwarded_to",
-        "x_original_to",
+        "to", "toEmail", "mailTo", "receiver", "receivers", "envelope_to",
+        "delivered_to", "x_forwarded_to", "x_original_to",
     ):
         if key in item:
             candidates.extend(_cloudflare_text_candidates(item.get(key)))
@@ -236,6 +290,7 @@ class CloudflareTempMailProvider(_MailboxProvider):
             "User-Agent": "Mozilla/5.0 (compatible; Grok2API/1.0)",
         })
         self._message_cache: dict[str, dict[str, Any]] = {}
+        self._last_inbox_diagnostic: tuple[str, float] = ("", 0.0)
 
     @staticmethod
     def _as_bool(value: Any, default: bool = False) -> bool:
@@ -319,31 +374,61 @@ class CloudflareTempMailProvider(_MailboxProvider):
             headers={"Authorization": f"Bearer {provider_token}"},
             params={"limit": 20, "offset": 0},
         )
-        raw = response.get("results", []) if isinstance(response, dict) else response
-        if not isinstance(raw, list):
-            raw = []
+        raw = _cloudflare_message_list_payload(response)
         messages: list[dict[str, Any]] = []
+        skipped_wrong_recipient = 0
+        skipped_without_id = 0
+        readable_content = 0
+        sample_keys: list[str] = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
+            if not sample_keys:
+                sample_keys = sorted(str(key) for key in item.keys())[:20]
             if not _cloudflare_message_matches_address(item, address):
+                skipped_wrong_recipient += 1
                 continue
-            message_id = str(item.get("id") or item.get("_id") or item.get("message_id") or item.get("uid") or "").strip()
+            message_id = str(
+                item.get("id") or item.get("_id") or item.get("message_id") or
+                item.get("messageId") or item.get("msgid") or item.get("uid") or
+                item.get("uuid") or item.get("message_uuid") or ""
+            ).strip()
             if not message_id:
+                skipped_without_id += 1
                 continue
             subject = str(item.get("subject") or item.get("title") or "")
-            body = _cloudflare_message_text(item.get("text_content") or item.get("text") or item.get("body") or item.get("content") or item.get("html_content") or item.get("html") or "")
+            text_content, html_content = _cloudflare_extract_message_content(item)
+            body = "\n".join(part for part in (text_content, html_content) if part).strip()
+            if body:
+                readable_content += 1
             normalized = {
                 "id": message_id,
                 "subject": subject,
                 "content": body,
-                "text": body,
-                "html_content": str(item.get("html_content") or item.get("html") or ""),
+                "text": text_content or body,
+                "html_content": html_content,
                 "received_at": item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp"),
                 "raw": item,
             }
             self._message_cache[message_id] = normalized
             messages.append(normalized)
+
+        # Log a schema-only summary at most once per 20 seconds.  It contains no
+        # JWT, password, email body or OTP, but makes provider-side format drift
+        # visible in the registration log.
+        summary = (
+            f"Cloudflare 临时邮箱收件箱：接口返回 {len(raw)} 封，已识别 {len(messages)} 封，"
+            f"正文可读 {readable_content} 封"
+        )
+        if skipped_wrong_recipient or skipped_without_id:
+            summary += f"（收件人不匹配跳过 {skipped_wrong_recipient}，缺少邮件 ID 跳过 {skipped_without_id}）"
+        if sample_keys:
+            summary += f"，邮件字段：{', '.join(sample_keys)}"
+        previous_summary, previous_at = self._last_inbox_diagnostic
+        now = time.monotonic()
+        if summary != previous_summary or now - previous_at >= 20.0:
+            print(f"[mail] {summary}", flush=True)
+            self._last_inbox_diagnostic = (summary, now)
         return messages
 
     def message_content(self, message_id: str, provider_token: str = "") -> str:
@@ -1271,6 +1356,13 @@ def extract_verification_code(content: str) -> str | None:
     hyphenated = re.search(r"(?<![&#])\b([A-Z0-9]{3,4}-[A-Z0-9]{3,4})\b", clean, re.I)
     if hyphenated:
         return hyphenated.group(1).upper()
+    # Some HTML-to-text conversions concatenate the following sentence directly
+    # onto the code (for example ``L3K-YY9If you did not create...``).  Accept
+    # that shape only when the mail contains verification context, preserving the
+    # protection against unrelated text/CSS identifiers.
+    glued_hyphenated = re.search(r"(?<![A-Z0-9&#])([A-Z0-9]{3,4}-[A-Z0-9]{3,4})(?=[A-Z][a-z]\b)", clean, re.I)
+    if glued_hyphenated and re.search(r"\b(?:code|confirmation|verify|validate)\b", clean, re.I):
+        return glued_hyphenated.group(1).upper()
     numeric = re.search(r"(?<![#&])\b(\d{6})\b", clean)
     return numeric.group(1) if numeric else None
 
