@@ -37,18 +37,13 @@ from app.dataplane.reverse.protocol.xai_chat import (
 )
 from app.dataplane.reverse.protocol.xai_assets import infer_content_type, resolve_asset_reference, resolve_download_url
 from app.dataplane.reverse.protocol.xai_image_edit import (
-    IMAGE_POST_MEDIA_TYPE,
     build_image_edit_payload,
     extract_model_response_file_attachments,
     extract_model_response_urls,
     extract_streaming_response,
 )
 from app.dataplane.reverse.transport.assets import download_asset
-from app.dataplane.reverse.transport.asset_upload import (
-    resolve_uploaded_asset_reference,
-    upload_from_input,
-)
-from app.dataplane.reverse.transport.media import create_media_post
+from app.dataplane.reverse.transport.asset_upload import upload_imagine_from_input
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_http_headers, build_sso_cookie
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
@@ -723,7 +718,6 @@ _EDIT_IMAGE_PLACEHOLDER_RE = re.compile(r"@IMAGE(\d+)\b", re.IGNORECASE)
 @dataclass(slots=True)
 class _EditReference:
     file_id: str
-    content_url: str
 
 
 def _normalize_edit_inputs(image_inputs: list[str]) -> list[str]:
@@ -748,13 +742,10 @@ def _normalize_edit_size(size: str) -> str:
 async def _prepare_edit_reference(
     token: str, image_input: str, index: int
 ) -> _EditReference:
-    """Upload one edit reference and resolve it to the upstream content URL."""
+    """Upload one reference with the current Imagine multipart endpoint."""
     try:
-        file_id, file_uri = await upload_from_input(token, image_input)
-        return _EditReference(
-            file_id=file_id,
-            content_url=resolve_uploaded_asset_reference(token, file_id, file_uri),
-        )
+        file_id, _file_uri = await upload_imagine_from_input(token, image_input)
+        return _EditReference(file_id=file_id)
     except ValidationError as exc:
         raise ValidationError(exc.message, param=f"image.{index}") from exc
     except UpstreamError as exc:
@@ -908,8 +899,7 @@ async def _collect_edit_final_urls(
     *,
     token: str,
     prompt: str,
-    image_references: list[str],
-    parent_post_id: str,
+    input_assets: list[str],
     timeout_s: float,
     progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> dict[int, str]:
@@ -919,8 +909,7 @@ async def _collect_edit_final_urls(
     async for line in _stream_image_edit(
         token,
         prompt,
-        image_references,
-        parent_post_id,
+        input_assets,
         timeout_s=timeout_s,
     ):
         ev_type, data = classify_line(line)
@@ -953,8 +942,7 @@ async def _collect_edit_images(
     *,
     token: str,
     prompt: str,
-    image_references: list[str],
-    parent_post_id: str,
+    input_assets: list[str],
     requested_n: int,
     response_format: str,
     timeout_s: float,
@@ -973,8 +961,7 @@ async def _collect_edit_images(
         final_urls = await _collect_edit_final_urls(
             token=token,
             prompt=prompt,
-            image_references=image_references,
-            parent_post_id=parent_post_id,
+            input_assets=input_assets,
             timeout_s=timeout_s,
             progress_cb=progress_cb,
         )
@@ -1119,20 +1106,18 @@ async def _stream_image_chat_request(
 async def _stream_image_edit(
     token: str,
     prompt: str,
-    image_references: list[str],
-    parent_post_id: str,
+    input_assets: list[str],
     *,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
     payload = build_image_edit_payload(
         prompt=prompt,
-        image_references=image_references,
-        parent_post_id=parent_post_id,
+        input_assets=input_assets,
     )
     async for line in _stream_image_chat_request(
         token=token,
         payload=payload,
-        referer=f"https://grok.com/imagine/post/{parent_post_id}",
+        referer="https://grok.com/imagine",
         timeout_s=timeout_s,
         operation="image_edit",
     ):
@@ -1338,22 +1323,7 @@ async def edit(
         if not edit_references:
             raise UpstreamError("All image uploads failed; cannot proceed with image edit")
         edit_prompt = _replace_edit_image_placeholders(prompt, edit_references)
-        image_references = [ref.content_url for ref in edit_references]
-
-        post = await create_media_post(
-            token,
-            media_type=IMAGE_POST_MEDIA_TYPE,
-            prompt=edit_prompt,
-        )
-        post_data = post.get("post")
-        if not isinstance(post_data, dict):
-            raise UpstreamError("Image edit create-post returned no post payload")
-        parent_post_id = str(post_data.get("id") or "").strip()
-        if not parent_post_id:
-            raise UpstreamError("Image edit create-post returned no post id")
-        post_prompt = post_data.get("originalPrompt") or post_data.get("prompt")
-        if isinstance(post_prompt, str) and post_prompt.strip():
-            edit_prompt = post_prompt.strip()
+        input_assets = [ref.file_id for ref in edit_references]
     except Exception:
         await _acct_dir.release(acct)
         raise
@@ -1377,8 +1347,7 @@ async def edit(
                     _collect_edit_images(
                         token=token,
                         prompt=edit_prompt,
-                        image_references=image_references,
-                        parent_post_id=parent_post_id,
+                        input_assets=input_assets,
                         requested_n=n,
                         response_format=response_format,
                         timeout_s=timeout_s,
@@ -1446,8 +1415,7 @@ async def edit(
         images = await _collect_edit_images(
             token=token,
             prompt=edit_prompt,
-            image_references=image_references,
-            parent_post_id=parent_post_id,
+            input_assets=input_assets,
             requested_n=n,
             response_format=response_format,
             timeout_s=timeout_s,

@@ -196,6 +196,20 @@ def _validate_image_edit_n(n: int, *, param: str) -> None:
         raise ValidationError("n must be between 1 and 2 for image edit", param=param)
 
 
+def _has_image_reference(messages: list[dict]) -> bool:
+    """Return whether a chat request contains at least one image reference."""
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "image_url":
+                image_url = block.get("image_url")
+                if isinstance(image_url, dict) and str(image_url.get("url") or "").strip():
+                    return True
+    return False
+
+
 async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
     raw = await upload.read()
     if not raw:
@@ -255,33 +269,49 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             )
 
         elif spec.is_image():
+            from .images import edit as img_edit
             from .images import generate as img_gen
 
             cfg = req.image_config or ImageConfig()
             size = cfg.size or "1024x1024"
             fmt = cfg.response_format or "url"
             n = cfg.n or 1
-            _validate_image_n(req.model, n, param="image_config.n")
-            # Extract prompt from last user message.
-            prompt = next(
-                (
-                    m.content
-                    for m in reversed(req.messages)
-                    if m.role == "user"
-                    and isinstance(m.content, str)
-                    and m.content.strip()
-                ),
-                "",
-            )
-            result = await img_gen(
-                model=req.model,
-                prompt=prompt or "",
-                n=n,
-                size=size,
-                response_format=fmt,
-                stream=is_stream,
-                chat_format=True,
-            )
+            if _has_image_reference(messages):
+                # Grok rejects uploaded references on the text-to-image route.
+                # Keep the selected image model's pool, but use its dedicated
+                # image-to-image request protocol for this one request.
+                _validate_image_edit_n(n, param="image_config.n")
+                result = await img_edit(
+                    model=req.model,
+                    messages=messages,
+                    n=n,
+                    size=size,
+                    response_format=fmt,
+                    stream=is_stream,
+                    chat_format=True,
+                )
+            else:
+                _validate_image_n(req.model, n, param="image_config.n")
+                # Extract prompt from last user message.
+                prompt = next(
+                    (
+                        m.content
+                        for m in reversed(req.messages)
+                        if m.role == "user"
+                        and isinstance(m.content, str)
+                        and m.content.strip()
+                    ),
+                    "",
+                )
+                result = await img_gen(
+                    model=req.model,
+                    prompt=prompt or "",
+                    n=n,
+                    size=size,
+                    response_format=fmt,
+                    stream=is_stream,
+                    chat_format=True,
+                )
 
         elif spec.is_video():
             from .video import completions as vid_comp

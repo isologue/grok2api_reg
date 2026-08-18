@@ -6,6 +6,7 @@ returns the file metadata ID used as a file attachment reference in chat.
 
 import asyncio
 import base64
+import binascii
 import mimetypes
 import re
 from urllib.parse import urlparse
@@ -29,6 +30,11 @@ from app.control.proxy.feedback import build_feedback
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 
 _UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
+# The current Imagine UI uploads reference images as multipart binary data and
+# passes fileMetadataId through mediaGenInput.imageToImage.inputAssets.
+# Keep the legacy endpoint below for chat attachments and video references.
+_IMAGINE_DIRECT_UPLOAD_URL = "https://grok.com/http/upload-file-v2/direct"
+_IMAGINE_FILE_SOURCE = "IMAGINE_SELF_UPLOAD_FILE_SOURCE"
 _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
 
 # Global semaphore — limits concurrent upload_file() calls across all requests.
@@ -113,6 +119,142 @@ async def upload_file(
         return await _upload_file_inner(token, filename, mime, b64)
 
 
+async def upload_imagine_image(
+    token: str,
+    filename: str,
+    mime: str,
+    b64: str,
+) -> tuple[str, str]:
+    """Upload an Imagine reference image using Grok's current multipart API.
+
+    The response returns ``fileMetadata.fileMetadataId``.  This ID is passed
+    directly to the Imagine ``inputAssets`` field rather than converted into a
+    content URL, matching the web UI's current request format.
+    """
+    if not mime.lower().startswith("image/"):
+        raise ValidationError("Image edit only supports image uploads", param="image")
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValidationError("Image data is not valid base64", param="image") from exc
+    if not raw:
+        raise ValidationError("Image data is empty", param="image")
+
+    async with _get_upload_sem():
+        return await _upload_imagine_image_inner(token, filename, mime, raw)
+
+
+async def _upload_imagine_image_inner(
+    token: str,
+    filename: str,
+    mime: str,
+    raw: bytes,
+) -> tuple[str, str]:
+    cfg = get_config()
+    timeout_s = cfg.get_float("asset.upload_timeout", 60.0)
+    proxy = await get_proxy_runtime()
+    lease = await proxy.acquire()
+    trace_id = start_upstream_trace(
+        account_token=token,
+        endpoint=_IMAGINE_DIRECT_UPLOAD_URL,
+        payload={
+            "operation": "imagine_reference_upload",
+            "file_name": filename,
+            "mime_type": mime,
+            "bytes": len(raw),
+        },
+    )
+    headers = build_http_headers(
+        token,
+        lease=lease,
+        origin="https://grok.com",
+        referer="https://grok.com/imagine",
+    )
+    # The HTTP client must generate a multipart boundary itself.
+    headers.pop("Content-Type", None)
+    kwargs = build_session_kwargs(lease=lease)
+
+    try:
+        async with ResettableSession(**kwargs) as session:
+            response = await session.post(
+                _IMAGINE_DIRECT_UPLOAD_URL,
+                headers=headers,
+                data={"file_source": _IMAGINE_FILE_SOURCE},
+                files={"file": (filename or "image", raw, mime)},
+                timeout=timeout_s,
+            )
+        body_bytes = response.content
+        if response.status_code != 200:
+            body_text = body_bytes.decode("utf-8", "replace")[:500]
+            await proxy.feedback(
+                lease,
+                build_feedback(
+                    response.status_code,
+                    is_cloudflare="just a moment" in body_text.lower(),
+                ),
+            )
+            error = UpstreamError(
+                f"Imagine reference upload returned {response.status_code}",
+                status=response.status_code,
+                body=body_text,
+            )
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=_IMAGINE_DIRECT_UPLOAD_URL,
+                error=error,
+                status=error.status,
+            )
+            raise error
+
+        try:
+            result = orjson.loads(body_bytes)
+        except Exception as exc:
+            raise UpstreamError("Imagine reference upload returned invalid JSON") from exc
+        metadata = result.get("fileMetadata") if isinstance(result, dict) else None
+        if not isinstance(metadata, dict):
+            raise UpstreamError("Imagine reference upload returned no file metadata")
+        file_id = str(metadata.get("fileMetadataId") or "").strip()
+        file_uri = str(metadata.get("fileUri") or "").strip()
+        if not file_id:
+            raise UpstreamError("Imagine reference upload returned no file id")
+
+        await proxy.feedback(
+            lease,
+            ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
+        )
+        finish_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=_IMAGINE_DIRECT_UPLOAD_URL,
+            response={"fileMetadataId": file_id, "fileUri": file_uri},
+            completed=True,
+        )
+        logger.info("Imagine reference upload completed: filename={!r} file_id={}", filename, file_id)
+        return file_id, file_uri
+    except UpstreamError as error:
+        # HTTP failures were traced above. Structural success-response failures
+        # still need a visible audit record.
+        if not error.details.get("body"):
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=_IMAGINE_DIRECT_UPLOAD_URL,
+                error=error,
+                status=error.status,
+            )
+        raise
+    except Exception as exc:
+        await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR))
+        error = UpstreamError(f"Imagine reference upload transport error: {exc}")
+        fail_upstream_trace(
+            trace_id,
+            account_token=token,
+            endpoint=_IMAGINE_DIRECT_UPLOAD_URL,
+            error=error,
+            status=error.status,
+        )
+        raise error from exc
 async def _upload_file_inner(
     token:    str,
     filename: str,
@@ -214,6 +356,51 @@ async def _upload_file_inner(
         raise error from exc
 
 
+async def upload_imagine_from_input(token: str, file_input: str) -> tuple[str, str]:
+    """Resolve a URL/data URI and upload it as an Imagine reference image."""
+    if _is_url(file_input):
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire()
+        try:
+            headers = build_http_headers(token, lease=lease)
+            kwargs = build_session_kwargs(lease=lease)
+            async with ResettableSession(**kwargs) as session:
+                response = await session.get(file_input, headers=headers, timeout=30.0)
+            raw = response.content
+            if response.status_code != 200:
+                await proxy.feedback(
+                    lease,
+                    ProxyFeedback(
+                        kind=(
+                            ProxyFeedbackKind.UPSTREAM_5XX
+                            if response.status_code >= 500
+                            else ProxyFeedbackKind.FORBIDDEN
+                        ),
+                        status_code=response.status_code,
+                    ),
+                )
+                raise UpstreamError(
+                    f"Failed to fetch input URL: {response.status_code}",
+                    status=response.status_code,
+                )
+            mime = (
+                response.headers.get("content-type", "").split(";", 1)[0].strip()
+                or "application/octet-stream"
+            )
+            filename = file_input.split("/")[-1].split("?", 1)[0] or "image"
+            b64 = base64.b64encode(raw).decode()
+        except UpstreamError:
+            raise
+        except Exception as exc:
+            await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR))
+            raise UpstreamError(f"Asset fetch transport error: {exc}") from exc
+        await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS))
+        return await upload_imagine_image(token, filename, mime, b64)
+
+    filename, b64, mime = parse_data_uri(file_input)
+    return await upload_imagine_image(token, filename, mime, b64)
+
+
 async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
     """High-level helper: parse *file_input* (URL or data URI) and upload.
 
@@ -279,6 +466,8 @@ def _extract_user_id(token: str) -> str | None:
 
 __all__ = [
     "upload_file",
+    "upload_imagine_image",
+    "upload_imagine_from_input",
     "upload_from_input",
     "parse_data_uri",
     "resolve_uploaded_asset_reference",

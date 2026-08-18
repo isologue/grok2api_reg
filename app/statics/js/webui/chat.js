@@ -899,12 +899,16 @@
     }));
 
     if (capability === 'image') {
-      if (pendingFiles.length) {
+      // Text-only requests keep using image generation. When a reference image
+      // is present, preserve it as an image_url block so the API can dispatch
+      // it to Grok's image-to-image flow instead of rejecting it client-side.
+      if (audioBlocks.length || fileBlocks.length) {
         throw new Error(text(
-          'webui.chat.errors.imageUploadsNotSupported',
-          'Image generation does not accept uploaded references here. Use chat, image edit, or video with a reference image.',
+          'webui.chat.errors.imageOnly',
+          'Image generation with a reference only supports image uploads.',
         ));
       }
+      if (imageBlocks.length) return { role: 'user', content: [...textBlock, ...imageBlocks] };
       return { role: 'user', content: prompt };
     }
     if (capability === 'image_edit') {

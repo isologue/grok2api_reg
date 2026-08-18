@@ -2,8 +2,6 @@
 
 from typing import Any
 
-from app.platform.config.snapshot import get_config
-
 IMAGE_EDIT_MODEL_NAME = "imagine-image-edit"
 IMAGE_EDIT_MODEL_KIND = "imagine"
 IMAGE_POST_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
@@ -13,38 +11,33 @@ IMAGE_EDIT_GENERATION_COUNT = 2
 def build_image_edit_payload(
     *,
     prompt: str,
-    image_references: list[str],
-    parent_post_id: str,
+    input_assets: list[str],
 ) -> dict[str, Any]:
-    """Build the JSON payload for imagine image-edit chat requests."""
-    cfg = get_config()
+    """Build a current Imagine image-to-image payload.
+
+    The Grok web application uploads each reference with
+    ``/http/upload-file-v2/direct`` and sends its ``fileMetadataId`` in
+    ``mediaGenInput.imageToImage.inputAssets``.  The old ``imageReferences`` /
+    ``parentPostId`` configuration is no longer accepted reliably upstream.
+    """
     return {
-        "temporary": cfg.get_bool("features.temporary", True),
         "modelName": IMAGE_EDIT_MODEL_NAME,
         "message": prompt,
-        "enableImageGeneration": True,
-        "returnImageBytes": False,
-        "returnRawGrokInXaiRequest": False,
         "enableImageStreaming": True,
-        "imageGenerationCount": IMAGE_EDIT_GENERATION_COUNT,
-        "forceConcise": False,
         "enableSideBySide": True,
         "sendFinalMetadata": True,
-        "isReasoning": False,
-        "disableTextFollowUps": True,
         "responseMetadata": {
             "modelConfigOverride": {
-                "modelMap": {
-                    "imageEditModel": IMAGE_EDIT_MODEL_KIND,
-                    "imageEditModelConfig": {
-                        "imageReferences": image_references,
-                        "parentPostId": parent_post_id,
-                    },
-                }
+                "modelMap": {"imageEditModel": IMAGE_EDIT_MODEL_KIND}
             }
         },
-        "disableMemory": not cfg.get_bool("features.memory", False),
-        "forceSideBySide": False,
+        "mediaGenInput": {
+            "imageToImage": {
+                "prompt": prompt,
+                "inputAssets": input_assets,
+            }
+        },
+        "kind": "CONVERSATION_KIND_IMAGINE",
     }
 
 
