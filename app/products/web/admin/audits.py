@@ -11,7 +11,7 @@ router = APIRouter(prefix="/audits", tags=["Admin - Request Audits"])
 @router.get("")
 async def list_request_audits(
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=10, le=2_000),
+    page_size: int = Query(10, ge=10, le=2_000),
     # Compatibility with the pre-pagination endpoint; explicit page_size wins.
     limit: int | None = Query(None, ge=10, le=2_000),
     query: str = Query("", max_length=255),

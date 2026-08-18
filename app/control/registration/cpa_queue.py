@@ -54,7 +54,7 @@ class CpaExportQueue:
             print(f"[cpa] OIDC export completed: {result.get('path')}", flush=True)
             probe = result.get("probe_models") if isinstance(result.get("probe_models"), dict) else {}
             model_ids = [str(item) for item in (probe.get("model_ids") or []) if str(item)]
-            if bool(self._cpa.get("auto_import_build", True)) and "grok-4.5" in model_ids and result.get("path"):
+            if bool(self._cpa.get("auto_import_build", True)) and model_ids and result.get("path"):
                 try:
                     from app.control.build import import_cpa_auth_file
                     imported = import_cpa_auth_file(str(result["path"]), model_ids=model_ids)

@@ -1030,6 +1030,8 @@
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M6 6 18 18"/><path d="M18 6 6 18"/></svg>
       </button>
       <select class="input toolbar-page-size" id="page-size-sel" onchange="changePageSize(this.value)">
+        <option value="10">10 / 页</option>
+        <option value="20">20 / 页</option>
         <option value="50">50 / 页</option>
         <option value="100">100 / 页</option>
         <option value="200">200 / 页</option>
@@ -1103,22 +1105,6 @@
       <button type="button" class="pagi-btn" id="build-account-next" onclick="changeBuildAccountPage(1)" aria-label="Next page">&#8250;</button>
     </div>
   </section>
-
-  <section id="cpa-export-tasks" style="scroll-margin-top:84px">
-    <div class="section-head" style="margin-top:40px">
-      <div class="section-title-row"><div class="section-title">CPA Auth 导出记录</div><span class="section-count-badge" id="cpa-task-count">0</span></div>
-      <div class="page-actions"><button type="button" class="page-action-btn" onclick="loadCpaTasks()">刷新</button></div>
-    </div>
-    <p class="page-sub" style="margin:0 0 12px">注册机自动导出和账号行内“重试 CPA 导出”任务都会在此保留结果，可点击查看日志。</p>
-    <div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>开始时间</th><th>结果</th><th>操作</th></tr></thead><tbody id="cpa-task-tbody"><tr><td colspan="5" class="empty-row">正在加载 CPA 导出记录</td></tr></tbody></table></div>
-    <div class="pagi" id="cpa-task-pagi">
-      <button type="button" class="pagi-btn" id="cpa-task-prev" onclick="changeCpaTaskPage(-1)" aria-label="&#19978;&#19968;&#39029;">&#8249;</button>
-      <div class="pagi-meta"><span class="pagi-page" id="cpa-task-page-info">&#31532; 0 / 0 &#39029;</span><select class="toolbar-page-size" id="cpa-task-page-size" aria-label="CPA &#20219;&#21153;&#27599;&#39029;&#25968;&#37327;"><option value="10">10 / &#39029;</option><option value="20">20 / &#39029;</option><option value="50">50 / &#39029;</option><option value="100">100 / &#39029;</option><option value="200">200 / &#39029;</option><option value="500">500 / &#39029;</option><option value="1000">1000 / &#39029;</option><option value="2000">2000 / &#39029;</option></select></div>
-      <button type="button" class="pagi-btn" id="cpa-task-next" onclick="changeCpaTaskPage(1)" aria-label="&#19979;&#19968;&#39029;">&#8250;</button>
-    </div>
-  </section>
-
-
 </main>
 
 <!-- ── Add Modal ───────────────────────────────────────────────────────────── -->
@@ -1266,8 +1252,8 @@
 <script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-const PAGE_SIZE_KEY = 'admin.account.page_size';
-const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000];
+const PAGE_SIZE_KEY = 'admin.account.page_size.v2';
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000, 2000];
 
 let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curCredentials = 'all', curCpaAuth = 'all', curCpaExportStatus = 'all', curPage = 1, pageSize = loadSavedPageSize();
 const sel = new Set();
@@ -1399,10 +1385,23 @@ function updateBuildSelectionUi() {
   if (info) info.textContent = selected ? BUILD_TEXT.selected.replace('{n}', String(selected)) : BUILD_TEXT.noneSelected;
   if (verifyButton) verifyButton.disabled = !selected;
   if (deleteButton) deleteButton.disabled = !selected;
-  if (all) { const visible = buildAccounts.map(item => item.id); all.checked = visible.length > 0 && visible.every(id => selectedBuildAccountIds.has(id)); all.indeterminate = !all.checked && visible.some(id => selectedBuildAccountIds.has(id)); }
+  if (all) {
+    const visible = buildAccounts.map(item => item.id);
+    all.checked = visible.length > 0 && visible.every(id => selectedBuildAccountIds.has(id));
+    all.indeterminate = !all.checked && visible.some(id => selectedBuildAccountIds.has(id));
+  }
+  document.querySelectorAll('#build-account-tbody .build-row-cb').forEach((checkbox) => {
+    checkbox.checked = selectedBuildAccountIds.has(checkbox.dataset.buildId || '');
+  });
 }
 function toggleBuildAccountSelected(id, checked) { if (checked) selectedBuildAccountIds.add(id); else selectedBuildAccountIds.delete(id); updateBuildSelectionUi(); }
-function toggleAllBuildAccounts(checked) { buildAccounts.forEach(item => { if (checked) selectedBuildAccountIds.add(item.id); else selectedBuildAccountIds.delete(item.id); }); updateBuildSelectionUi(); }
+function toggleAllBuildAccounts(checked) {
+  buildAccounts.forEach(item => {
+    if (checked) selectedBuildAccountIds.add(item.id);
+    else selectedBuildAccountIds.delete(item.id);
+  });
+  updateBuildSelectionUi();
+}
 function renderBuildAccounts() {
   const body = document.getElementById('build-account-tbody');
   const count = document.getElementById('build-account-count');
@@ -1420,7 +1419,7 @@ function renderBuildAccounts() {
     const checked = selectedBuildAccountIds.has(item.id) ? ' checked' : '';
     const reason = buildStatusDescription(item);
     const toggle = item.enabled ? `<button type="button" class="pagi-btn" onclick="toggleBuildAccount('${id}', false)">${BUILD_TEXT.disable}</button>` : `<button type="button" class="pagi-btn" onclick="toggleBuildAccount('${id}', true)">${BUILD_TEXT.enable}</button>`;
-    return `<tr><td><input type="checkbox" class="cb"${checked} onchange="toggleBuildAccountSelected('${id}', this.checked)"></td><td><div>${_html(item.email || item.user_id || item.id)}</div>${item.email && item.user_id ? `<small style="color:#6b7280">${_html(item.user_id)}</small>` : ''}</td><td><button type="button" class="pagi-btn" style="color:${buildStatusColor(status)};border-color:currentColor" onclick="showBuildAccountDetails('${id}')">${buildStatusLabel(status)}</button></td><td title="${_html(reason)}">${_html(reason)}</td><td class="table-center" style="font-variant-numeric:tabular-nums;color:#198754">${Number(item.success_count || 0)}</td><td class="table-center" style="font-variant-numeric:tabular-nums;color:#b42318">${Number(item.failure_count || 0)}</td><td title="${_html((item.models || []).join(', '))}">${_html((item.models || []).join(', ') || BUILD_TEXT.notSynced)}</td><td>${_html(_buildDate(item.expires_at))}</td><td>${_html(_buildDate(item.last_refresh_at))}</td><td title="${_html(item.last_error || item.last_refresh_error || '')}">${_html(item.last_error || item.last_refresh_error || '-')}</td><td class="build-account-action-cell"><div class="build-account-actions"><button type="button" class="pagi-btn" onclick="syncBuildAccount('${id}')">${BUILD_TEXT.sync}</button><button type="button" class="pagi-btn" onclick="verifyBuildAccount('${id}')">${BUILD_TEXT.verify}</button>${toggle}<button type="button" class="pagi-btn" onclick="deleteBuildAccount('${id}')">${BUILD_TEXT.delete}</button></div></td></tr>`;
+    return `<tr><td><input type="checkbox" class="cb build-row-cb" data-build-id="${id}"${checked} onchange="toggleBuildAccountSelected('${id}', this.checked)"></td><td><div>${_html(item.email || item.user_id || item.id)}</div>${item.email && item.user_id ? `<small style="color:#6b7280">${_html(item.user_id)}</small>` : ''}</td><td><button type="button" class="pagi-btn" style="color:${buildStatusColor(status)};border-color:currentColor" onclick="showBuildAccountDetails('${id}')">${buildStatusLabel(status)}</button></td><td title="${_html(reason)}">${_html(reason)}</td><td class="table-center" style="font-variant-numeric:tabular-nums;color:#198754">${Number(item.success_count || 0)}</td><td class="table-center" style="font-variant-numeric:tabular-nums;color:#b42318">${Number(item.failure_count || 0)}</td><td title="${_html((item.models || []).join(', '))}">${_html((item.models || []).join(', ') || BUILD_TEXT.notSynced)}</td><td>${_html(_buildDate(item.expires_at))}</td><td>${_html(_buildDate(item.last_refresh_at))}</td><td title="${_html(item.last_error || item.last_refresh_error || '')}">${_html(item.last_error || item.last_refresh_error || '-')}</td><td class="build-account-action-cell"><div class="build-account-actions"><button type="button" class="pagi-btn" onclick="syncBuildAccount('${id}')">${BUILD_TEXT.sync}</button><button type="button" class="pagi-btn" onclick="verifyBuildAccount('${id}')">${BUILD_TEXT.verify}</button>${toggle}<button type="button" class="pagi-btn" onclick="deleteBuildAccount('${id}')">${BUILD_TEXT.delete}</button></div></td></tr>`;
   }).join('') : `<tr><td colspan="11" class="empty-row">${BUILD_TEXT.emptyAccounts}</td></tr>`;
   updateBuildSelectionUi();
 }
@@ -2199,7 +2198,7 @@ function nextPage() {
 }
 function changePageSize(v) {
   const next = Number(v);
-  pageSize = PAGE_SIZE_OPTIONS.includes(next) ? next : 50;
+  pageSize = PAGE_SIZE_OPTIONS.includes(next) ? next : 10;
   localStorage.setItem(PAGE_SIZE_KEY, String(pageSize));
   curPage = 1;
   renderTable();
@@ -2234,7 +2233,7 @@ function $(id, v) { const el = document.getElementById(id); if (el) el.textConte
 function fmt(n) { return n >= 10000 ? (n/1000).toFixed(1)+'k' : n; }
 function loadSavedPageSize() {
   const raw = Number(localStorage.getItem(PAGE_SIZE_KEY) || 0);
-  return PAGE_SIZE_OPTIONS.includes(raw) ? raw : 50;
+  return PAGE_SIZE_OPTIONS.includes(raw) ? raw : 10;
 }
 function fmtRate(success, fail) {
   const total = success + fail;

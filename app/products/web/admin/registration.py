@@ -419,7 +419,7 @@ async def retry_cpa_auth_for_account(
             probe = result.get("probe_models") if isinstance(result.get("probe_models"), dict) else {}
             model_ids = [str(item) for item in (probe.get("model_ids") or []) if str(item)]
             task["models"] = model_ids
-            if bool(cpa.get("auto_import_build", True)) and "grok-4.5" in model_ids and result.get("path"):
+            if bool(cpa.get("auto_import_build", True)) and model_ids and result.get("path"):
                 try:
                     from app.control.build import import_cpa_auth_file
                     from app.control.build.routes import store as build_routes
@@ -634,11 +634,11 @@ async def get_cpa_auth_task_logs(task_id: str):
 async def list_cpa_auth_export_tasks(
     request: Request,
     page: int = 1,
-    page_size: int = 50,
+    page_size: int = 10,
 ):
     """Return a page of task-isolated CPA export groups without auth contents."""
     safe_page = max(1, int(page or 1))
-    safe_size = min(max(int(page_size or 50), 10), 2_000)
+    safe_size = min(max(int(page_size or 10), 10), 2_000)
     settings = _manager(request)._read_settings_raw()
     rows = list_cpa_auth_tasks(dict(settings.get("cpa") or {}))
     total = len(rows)

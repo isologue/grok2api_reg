@@ -84,19 +84,19 @@ button{cursor:pointer}
 .site-footer-version{font-variant-numeric:tabular-nums}
 
 /* Admin layout */
-.admin-header{background:#FAF9F5;position:fixed;top:0;left:0;right:0;z-index:100}
-.admin-header-inner{max-width:1280px;width:100%;height:54px;margin:0 auto;padding:0 28px;display:grid;grid-template-columns:minmax(220px,260px) minmax(0,1fr) minmax(240px,272px);align-items:center;gap:16px}
+.admin-header{background:#FAF9F5;position:fixed;top:0;left:0;bottom:0;width:236px;z-index:100;border-right:1px solid #ece6dc}
+.admin-header-inner{width:100%;height:100%;padding:24px 16px 18px;display:flex;flex-direction:column;align-items:stretch;gap:24px;box-sizing:border-box}
 .webui-header-bar{width:100%;background:#FAF9F5}
 .webui-header-inner{max-width:none;padding:0 18px}
-.admin-brand-wrap{display:flex;align-items:center;gap:8px;min-width:0;white-space:nowrap}
+.admin-brand-wrap{display:flex;align-items:center;gap:8px;min-width:0;white-space:nowrap;flex-wrap:wrap}
 .admin-brand-link{display:inline-flex;align-items:center;gap:8px;min-width:0;color:inherit}
 .admin-brand{font-size:14px;font-weight:700}
 .admin-username{font-size:12px;color:var(--fg-muted);overflow:hidden;text-overflow:ellipsis}
-.admin-nav{display:flex;align-items:center;justify-content:center;gap:0;min-width:0}
-.admin-nav-link{font-size:14px;color:var(--fg-muted);padding:6px 14px;font-weight:500;transition:color .15s;border-radius:0}
-.admin-nav-link:hover{color:var(--fg)}
-.admin-nav-link.active{color:var(--fg);font-weight:600}
-.admin-header-right{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0;white-space:nowrap}
+.admin-nav{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:4px;min-width:0;flex:1}
+.admin-nav-link{font-size:13px;color:var(--fg-muted);padding:10px 12px;font-weight:500;transition:color .15s,background .15s;border-radius:9px;line-height:1.2}
+.admin-nav-link:hover{color:var(--fg);background:#f1ece2}
+.admin-nav-link.active{color:var(--fg);font-weight:600;background:#eee7da}
+.admin-header-right{display:flex;align-items:center;justify-content:flex-start;gap:6px;min-width:0;white-space:nowrap;margin-top:auto;padding-top:12px;border-top:1px solid #eee8de}
 .admin-header-version{
   display:inline-flex;align-items:center;height:28px;padding:0 10px;border-radius:999px;
   position:relative;background:#f1ece2;color:#6a6459;font-size:11px;font-weight:600;letter-spacing:.02em;flex:0 0 auto;
@@ -137,7 +137,15 @@ button{cursor:pointer}
 .admin-badge{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;border:1px solid;letter-spacing:.04em}
 .admin-badge-green{color:#16a34a;border-color:#16a34a;background:#f0fdf4}
 .admin-badge-blue{color:#2563eb;border-color:#2563eb;background:#eff6ff}
-.admin-main{max-width:1280px;margin:0 auto;padding:78px 28px 24px}
+.admin-main{width:min(1280px,calc(100% - 236px));max-width:none;margin:0 0 0 236px;padding:32px 28px 24px;box-sizing:border-box}
+/* WebUI 仍使用顶部导航，不跟随管理后台侧栏布局。 */
+.webui-header-bar{position:fixed;top:0;left:0;right:0;bottom:auto;width:100%;height:54px;border:0}
+.webui-header-inner{width:100%;height:54px;padding:0 18px;display:grid;grid-template-columns:minmax(220px,260px) minmax(0,1fr) minmax(160px,220px);align-items:center;gap:16px;box-sizing:border-box}
+.webui-header-bar .admin-brand-wrap{flex-wrap:nowrap}
+.webui-header-bar .admin-nav{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:0;flex:initial}
+.webui-header-bar .admin-nav-link{font-size:14px;padding:6px 14px;border-radius:0;background:transparent}
+.webui-header-bar .admin-nav-link.active{background:transparent}
+.webui-header-bar .admin-header-right{margin-top:0;padding-top:0;border-top:0;justify-content:flex-end}
 
 /* WebUI layout */
 .webui-page{--webui-control-surface:#f1ece2;min-height:100vh;background:#FAF9F5;color:#171717;padding-top:54px}
@@ -946,8 +954,9 @@ textarea.input{height:auto;padding:8px 10px;resize:vertical}
 textarea.input.webui-textarea{padding:8px 0 !important;resize:none !important}
 
 @media (max-width: 960px){
+  .admin-header{left:0;right:0;bottom:auto;width:100%;height:auto;border-right:0;border-bottom:1px solid #ece6dc}
   .admin-header-inner{
-    height:auto;padding:10px 12px;
+    display:grid;height:auto;padding:10px 12px;
     grid-template-columns:minmax(0,1fr) auto;
     grid-template-areas:
       "brand actions"
@@ -967,6 +976,7 @@ textarea.input.webui-textarea{padding:8px 0 !important;resize:none !important}
     flex:0 0 auto;padding:6px 10px;font-size:13px;line-height:1;border-radius:999px;background:transparent
   }
   .admin-nav-link.active{background:#efe8dc}
+  .admin-main{width:100%;margin:0;padding:128px 12px 24px}
   .admin-header-right{grid-area:actions;gap:4px;align-self:center}
   .admin-header-version{height:30px;padding:0 8px;font-size:10px}
   .admin-header-version.has-update::after{top:6px;right:4px}

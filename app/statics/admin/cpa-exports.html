@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CPA 导出记录</title>
+  <link rel="stylesheet" href="/static/css/app.css?v={{APP_VERSION}}">
+  <style>
+    body{background:#faf9f5}
+    .page-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
+    .page-title{font-size:22px;font-weight:700;line-height:1.2}
+    .page-sub{margin-top:6px;color:var(--fg-muted);font-size:13px;line-height:1.6}
+    .cpa-card{background:#fff;border:1px solid #e8e3da;border-radius:12px;padding:16px}
+    .cpa-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+    .cpa-count{background:#f1ece2;border-radius:999px;padding:5px 10px;color:#645d52;font-size:12px}
+    .cpa-table{width:100%;border-collapse:collapse;font-size:13px}
+    .cpa-table th,.cpa-table td{border-bottom:1px solid #f0ede8;padding:11px 9px;text-align:left;vertical-align:top;word-break:break-word}
+    .cpa-table th{font-size:11px;color:#888;font-weight:600;white-space:nowrap}
+    .cpa-table code{font-size:11px;color:#665d50;background:#f7f4ee;border-radius:5px;padding:3px 5px}
+    .state{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:12px;white-space:nowrap}
+    .state-queued,.state-running{background:#fff7df;color:#996c00}.state-completed{background:#eaf8ef;color:#197345}.state-failed{background:#fff0ee;color:#b42318}.state-legacy{background:#f1f1f1;color:#777}
+    .cpa-actions{display:flex;gap:6px;flex-wrap:wrap}.cpa-btn{height:29px;padding:0 10px;border:1px solid #e1dbd0;border-radius:7px;background:#fff;color:#4d473f;font-size:12px;cursor:pointer;white-space:nowrap}.cpa-btn:hover{background:#f6f3ed;border-color:#d5ccbe}.cpa-btn:disabled{opacity:.45;cursor:not-allowed}
+    .cpa-pagi{display:flex;align-items:center;justify-content:flex-end;gap:6px;padding-top:14px}.cpa-pagi .pagi-btn{width:28px;height:28px}.cpa-pagi-meta{display:flex;align-items:center;gap:8px;color:#888;font-size:12px}.cpa-page-size{width:94px;height:28px;border:1px solid #ddd4c8;border-radius:999px;background:#fafafa;color:inherit;font:inherit}
+    .cpa-log{margin:0;max-height:64vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#171717;color:#eee;border-radius:8px;padding:13px;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
+    @media(max-width:720px){.page-hd{display:block}.cpa-card{padding:10px}.cpa-table{min-width:760px}.cpa-scroll{overflow:auto}}
+  </style>
+</head>
+<body>
+  <div id="admin-header" data-active="/admin/cpa-exports"></div>
+  <main class="admin-main">
+    <div class="page-hd"><div><div class="page-title">CPA 导出记录</div><div class="page-sub">注册机自动导出、手动重试和批量重试产生的 CPA Auth 文件会按任务独立保存。可查看任务日志或下载指定任务的 ZIP 文件。</div></div><button type="button" class="page-action-btn" id="cpa-refresh">刷新</button></div>
+    <section class="cpa-card">
+      <div class="cpa-toolbar"><span class="cpa-count" id="cpa-count">共 0 个任务</span><span class="page-sub" style="margin:0">列表会自动每 12 秒刷新</span></div>
+      <div class="cpa-scroll"><table class="cpa-table"><thead><tr><th>任务编号</th><th>状态</th><th>开始时间</th><th>完成时间</th><th>导出结果</th><th>操作</th></tr></thead><tbody id="cpa-tbody"><tr><td colspan="6" class="empty-row">正在加载 CPA 导出记录…</td></tr></tbody></table></div>
+      <div class="cpa-pagi"><button type="button" class="pagi-btn" id="cpa-prev" aria-label="上一页">‹</button><div class="cpa-pagi-meta"><span id="cpa-page-info">第 0 / 0 页</span><select class="cpa-page-size" id="cpa-page-size" aria-label="每页数量"><option value="10">10 / 页</option><option value="20">20 / 页</option><option value="50">50 / 页</option><option value="100">100 / 页</option><option value="200">200 / 页</option></select></div><button type="button" class="pagi-btn" id="cpa-next" aria-label="下一页">›</button></div>
+    </section>
+  </main>
+  <div class="modal-overlay" id="cpa-log-modal" aria-hidden="true"><div class="modal" style="max-width:980px"><div class="modal-title" id="cpa-log-title">CPA 导出任务日志</div><div class="dialog-body"><pre class="cpa-log" id="cpa-log-content">正在加载…</pre></div><div class="dialog-actions"><button type="button" class="dialog-btn" id="cpa-log-close">关闭</button></div></div></div>
+  <script src="/static/js/auth.js?v={{APP_VERSION}}"></script><script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script><script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
+  <script>
+    const API='/admin/api';
+    const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const fmtDate=v=>{if(!v)return '-';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString()};
+    const stateText={queued:'排队中',running:'运行中',completed:'已完成',failed:'失败',legacy:'旧数据'};
+    const stateClass=s=>['queued','running','completed','failed','legacy'].includes(s)?s:'legacy';
+    const api=async(path,opts={})=>{const key=await adminKey.get();const r=await fetch(API+path,{...opts,headers:{...(opts.headers||{}),Authorization:`Bearer ${key}`}});if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`)}return r};
+    let items=[],page=1,total=0,totalPages=1,pageSize=Number(localStorage.getItem('admin.cpa_exports.page_size'))||10,loading=0;
+    function render(){const body=document.querySelector('#cpa-tbody');document.querySelector('#cpa-count').textContent=`共 ${total} 个任务`;document.querySelector('#cpa-page-info').textContent=`第 ${total?page:0} / ${totalPages} 页`;document.querySelector('#cpa-prev').disabled=page<=1;document.querySelector('#cpa-next').disabled=page>=totalPages;if(!items.length){body.innerHTML='<tr><td colspan="6" class="empty-row">暂无 CPA 导出记录</td></tr>';return}body.innerHTML=items.map(t=>{const state=String(t.state||'legacy');const exported=Number(t.exported_count||0),failed=Number(t.failed_count||0),auths=Number(t.auth_count||0),id=esc(t.task_id||'');const canDownload=auths>0;return `<tr><td><code>${id||'-'}</code></td><td><span class="state state-${stateClass(state)}">${esc(stateText[state]||state)}</span></td><td>${esc(fmtDate(t.started_at||t.created_at))}</td><td>${esc(fmtDate(t.finished_at))}</td><td>成功 ${exported} / 失败 ${failed} / JSON ${auths}</td><td><div class="cpa-actions"><button type="button" class="cpa-btn" data-log="${id}">查看日志</button><button type="button" class="cpa-btn" data-download="${id}" ${canDownload?'':'disabled'}>下载 ZIP</button></div></td></tr>`}).join('')}
+    async function load(){if(loading)return;loading=1;try{const r=await api(`/registration/cpa-auths/tasks?page=${page}&page_size=${pageSize}`);const d=await r.json();items=Array.isArray(d.items)?d.items:[];total=Number(d.total||0);totalPages=Math.max(1,Number(d.total_pages||1));page=Math.min(Math.max(1,Number(d.page||page)),totalPages);render()}catch(e){document.querySelector('#cpa-tbody').innerHTML=`<tr><td colspan="6" style="color:#b42318">加载失败：${esc(e.message)}</td></tr>`}finally{loading=0}}
+    async function showLog(id){const modal=document.querySelector('#cpa-log-modal'),content=document.querySelector('#cpa-log-content');document.querySelector('#cpa-log-title').textContent=`CPA 导出任务日志 - ${id}`;content.textContent='正在加载任务日志…';modal.classList.add('open');modal.setAttribute('aria-hidden','false');try{const r=await api(`/registration/cpa-auths/tasks/${encodeURIComponent(id)}/logs`);const d=await r.json();content.textContent=Array.isArray(d.lines)&&d.lines.length?d.lines.join('\n'):'暂无可查看的任务日志'}catch(e){content.textContent=`加载任务日志失败：${e.message}`}}
+    async function download(id){try{const r=await api(`/registration/cpa-auths/export?task_id=${encodeURIComponent(id)}`);const blob=await r.blob();const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`grok2api-cpa-auths-${id}.zip`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){alert(`下载 CPA Auth 失败：${e.message}`)}}
+    document.querySelector('#cpa-tbody').addEventListener('click',e=>{const log=e.target.closest('[data-log]'),dl=e.target.closest('[data-download]');if(log)showLog(log.dataset.log);if(dl&&!dl.disabled)download(dl.dataset.download)});
+    document.querySelector('#cpa-refresh').onclick=()=>load();document.querySelector('#cpa-prev').onclick=()=>{if(page>1){page--;load()}};document.querySelector('#cpa-next').onclick=()=>{if(page<totalPages){page++;load()}};document.querySelector('#cpa-page-size').value=String([10,20,50,100,200].includes(pageSize)?pageSize:10);document.querySelector('#cpa-page-size').onchange=e=>{page=1;pageSize=Number(e.target.value)||10;localStorage.setItem('admin.cpa_exports.page_size',String(pageSize));load()};document.querySelector('#cpa-log-close').onclick=()=>{const m=document.querySelector('#cpa-log-modal');m.classList.remove('open');m.setAttribute('aria-hidden','true')};document.querySelector('#cpa-log-modal').onclick=e=>{if(e.target===e.currentTarget)document.querySelector('#cpa-log-close').click()};
+    (async()=>{await renderAdminHeader?.();await renderSiteFooter?.();const key=await adminKey.get();if(!key||!await verifyKey('/admin/api/verify',key).catch(()=>false)){location.href='/admin/login';return}await load();setInterval(()=>load().catch(()=>{}),12000)})();
+  </script>
+</body>
+</html>

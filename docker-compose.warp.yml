@@ -14,7 +14,15 @@ services:
     container_name: warp-proxy
     restart: unless-stopped
     environment:
-      - WARP_SLEEP=2
+      # warp-svc 在网络较慢或首次注册时可能超过 2 秒才创建控制 socket。
+      # 等待时间过短会让 entrypoint 的 warp-cli 直接失败并触发容器重启。
+      WARP_SLEEP: "${WARP_SLEEP:-10}"
+    healthcheck:
+      test: ["CMD-SHELL", "bash /healthcheck/index.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -30,7 +38,14 @@ services:
     ports:
       - "127.0.0.1:40081:8118"
     depends_on:
-      - warp-proxy
+      warp-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   # ── FlareSolverr: 自动解 Cloudflare 挑战 ────────────────────────────────
   flaresolverr:
@@ -47,6 +62,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.registration
+      args:
+        # 可通过 DEBIAN_MIRROR 覆盖 Debian 软件源；国内网络默认使用阿里云镜像。
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-https://mirrors.aliyun.com}
     container_name: grok2api
     # Reap short-lived Chromium/Xvfb descendants from CPA browser fallback.
     init: true
@@ -78,8 +96,8 @@ services:
       init-config:
         condition: service_completed_successfully
       warp-proxy:
-        condition: service_started
+        condition: service_healthy
       privoxy:
-        condition: service_started
+        condition: service_healthy
       flaresolverr:
         condition: service_started

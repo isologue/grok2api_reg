@@ -220,9 +220,9 @@ def mint_and_export(
             f"has_grok_45={pr.get('has_grok_45')} ids={pr.get('model_ids')} "
             f"error={str(pr.get('error') or '')[:200]}"
         )
-        if not pr.get("has_grok_45"):
+        if not pr.get("has_build_model", bool(pr.get("model_ids"))):
             result["ok"] = False
-            result["error"] = "token ok but grok-4.5 not listed"
+            result["error"] = "token ok but no Build model listed"
         if probe_chat and pr.get("has_grok_45"):
             ch = probe_mini_response(
                 tokens["access_token"], base_url=base_url, proxy=resolved or None

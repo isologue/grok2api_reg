@@ -66,6 +66,10 @@ async def admin_audits():
 async def admin_model_routes():
     return _serve_html("admin/model-routes.html")
 
+@router.get("/admin/cpa-exports", include_in_schema=False)
+async def admin_cpa_exports():
+    return _serve_html("admin/cpa-exports.html")
+
 @router.get("/admin/logs", include_in_schema=False)
 async def admin_logs():
     return _serve_html("admin/logs.html")

@@ -279,7 +279,7 @@ def export_cpa_auth(
     if (
         not result.get("ok")
         and result.get("path")
-        and str(result.get("error") or "").startswith("token ok but grok-4.5 not listed")
+        and str(result.get("error") or "").startswith("token ok but no Build model listed")
         and not _bool(cpa.get("probe_required"), False)
     ):
         result["ok"] = True

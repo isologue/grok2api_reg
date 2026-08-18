@@ -57,6 +57,7 @@ def probe_models(
                 "status": getattr(resp, "status", 200),
                 "model_ids": ids,
                 "has_grok_45": any(i == "grok-4.5" for i in ids),
+                "has_build_model": bool(ids),
             }
     except urllib.error.HTTPError as e:
         return {
@@ -65,6 +66,7 @@ def probe_models(
             "error": e.read().decode("utf-8", errors="replace")[:500],
             "model_ids": [],
             "has_grok_45": False,
+            "has_build_model": False,
         }
     except Exception as e:  # noqa: BLE001
         return {
@@ -73,6 +75,7 @@ def probe_models(
             "error": str(e),
             "model_ids": [],
             "has_grok_45": False,
+            "has_build_model": False,
         }
 
 
