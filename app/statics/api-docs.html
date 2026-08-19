@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Grok2API 图像与视频 API 开发者文档">
+  <title>开发者文档 · Grok2API</title>
+  <link rel="stylesheet" href="/static/css/api-docs.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/api-docs"><span class="brand-mark">G</span><span>Grok2API</span><small>开发者文档</small></a>
+    <div class="top-actions"><a href="/admin/account">管理后台</a><a href="/docs" target="_blank" rel="noopener">OpenAPI</a></div>
+  </header>
+  <div class="doc-layout">
+    <aside class="sidebar">
+      <div class="side-title">接口目录</div>
+      <nav id="doc-nav">
+        <a href="#overview">概览</a><a href="#auth">身份验证</a><a href="#models">获取模型</a>
+        <a href="#image-generation">文生图</a><a href="#image-edit">图生图</a>
+        <a href="#video-generation">文生视频</a><a href="#video-reference">图生视频</a>
+        <a href="#video-status">查询视频任务</a><a href="#download">下载媒体</a><a href="#errors">常见错误</a>
+      </nav>
+      <div class="side-note">版本 {{APP_VERSION}}<br>所有请求使用 Bearer API Key。</div>
+    </aside>
+    <main class="content">
+      <section id="overview" class="hero section-anchor">
+        <span class="eyebrow">OPENAI COMPATIBLE API</span>
+        <h1>图像与视频接口</h1>
+        <p>使用 OpenAI 兼容接口调用 Grok Imagine 图像生成、参考图编辑及视频生成能力。示例只提供 cURL 和 Python <code>requests</code>。</p>
+        <div class="base-url-box"><label for="base-url">Base URL</label><input id="base-url" type="url" autocomplete="url"><button id="reset-base" type="button">恢复当前站点</button></div>
+        <div class="callout"><b>使用方式：</b>复制示例后，将 <code>YOUR_API_KEY</code> 替换为配置管理中创建的 API Key。页面会将示例中的 <code>{{BASE_URL}}</code> 自动替换为上面的地址。</div>
+      </section>
+
+      <section id="auth" class="section-anchor"><h2>身份验证</h2><p>除媒体文件查询接口外，所有业务接口都需要在 HTTP 请求头中携带 API Key。</p>
+        <pre class="plain-code"><code>Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json</code></pre>
+      </section>
+
+      <section id="models" class="section-anchor"><div class="endpoint-title"><span class="method get">GET</span><h2>/v1/models</h2></div><p>返回当前实例已启用、可调用的模型。请以该接口实际返回的模型 ID 为准。</p>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl "{{BASE_URL}}/v1/models" \
+  -H "Authorization: Bearer YOUR_API_KEY"</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+response = requests.get(
+    "{{BASE_URL}}/v1/models",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    timeout=60,
+)
+response.raise_for_status()
+print(response.json())</code></pre></div>
+        <h3>成功响应示例</h3><pre class="response"><code>{
+  "object": "list",
+  "data": [
+    {"id": "grok-imagine-image-lite", "object": "model"},
+    {"id": "grok-video", "object": "model"}
+  ]
+}</code></pre>
+      </section>
+
+      <section id="image-generation" class="section-anchor"><div class="endpoint-title"><span class="method post">POST</span><h2>/v1/images/generations</h2></div><p>根据文字提示词生成图片。请求体必须为 JSON。</p>
+        <table><thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>必填。图像模型 ID，例如 <code>grok-imagine-image-lite</code>。</td></tr><tr><td><code>prompt</code></td><td>string</td><td>必填。图片描述。</td></tr><tr><td><code>n</code></td><td>integer</td><td>可选，生成数量，默认 <code>1</code>。</td></tr><tr><td><code>size</code></td><td>string</td><td>可选，默认 <code>1024x1024</code>。</td></tr><tr><td><code>response_format</code></td><td>string</td><td><code>url</code> 或 <code>b64_json</code>，默认 <code>url</code>。</td></tr></tbody></table>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl "{{BASE_URL}}/v1/images/generations" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-imagine-image-lite",
+    "prompt": "一只戴着宇航员头盔的橘猫，电影感光影",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "url"
+  }'</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+payload = {
+    "model": "grok-imagine-image-lite",
+    "prompt": "一只戴着宇航员头盔的橘猫，电影感光影",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "url",
+}
+response = requests.post(
+    "{{BASE_URL}}/v1/images/generations",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    json=payload,
+    timeout=180,
+)
+response.raise_for_status()
+print(response.json())</code></pre></div>
+        <h3>成功响应示例（<code>response_format=url</code>）</h3><pre class="response"><code>{
+  "created": 1787126400,
+  "data": [
+    {"url": "{{BASE_URL}}/v1/files/image?id=3d1d5d4d-2c8f-4c7f-a5f6-5d95c70c9e01"}
+  ]
+}</code></pre>
+      </section>
+
+      <section id="image-edit" class="section-anchor"><div class="endpoint-title"><span class="method post">POST</span><h2>/v1/images/edits</h2></div><p>上传一张或多张参考图，并按提示词生成编辑后的图片。请求必须使用 <code>multipart/form-data</code>。</p>
+        <div class="warning"><b>注意：</b>文件字段名必须为 <code>image[]</code>。当前不支持 <code>mask</code>；请确保声明的 MIME 类型与文件真实格式一致。</div>
+        <table><thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>必填。图像编辑模型 ID。</td></tr><tr><td><code>prompt</code></td><td>string</td><td>必填。编辑要求。</td></tr><tr><td><code>image[]</code></td><td>file</td><td>必填。参考图片，可重复传入。</td></tr><tr><td><code>n</code></td><td>integer</td><td>可选，默认 <code>1</code>。</td></tr><tr><td><code>size</code></td><td>string</td><td>可选，默认 <code>1024x1024</code>。</td></tr><tr><td><code>response_format</code></td><td>string</td><td>可选：<code>url</code> 或 <code>b64_json</code>。</td></tr></tbody></table>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl "{{BASE_URL}}/v1/images/edits" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "model=grok-imagine-image-lite" \
+  -F "prompt=将人物改为在海边散步的水彩插画" \
+  -F "image[]=@./reference.jpg;type=image/jpeg" \
+  -F "n=1" \
+  -F "size=1024x1024" \
+  -F "response_format=url"</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+with open("reference.jpg", "rb") as image_file:
+    response = requests.post(
+        "{{BASE_URL}}/v1/images/edits",
+        headers={"Authorization": "Bearer YOUR_API_KEY"},
+        data={
+            "model": "grok-imagine-image-lite",
+            "prompt": "将人物改为在海边散步的水彩插画",
+            "n": "1", "size": "1024x1024", "response_format": "url",
+        },
+        files={"image[]": ("reference.jpg", image_file, "image/jpeg")},
+        timeout=180,
+    )
+response.raise_for_status()
+print(response.json())</code></pre></div>
+        <h3>成功响应示例</h3><pre class="response"><code>{"created": 1787126400, "data": [{"url": "{{BASE_URL}}/v1/files/image?id=2a80cb8b-11c2-4a6a-a00f-925d2e3dbf80"}]}</code></pre>
+      </section>
+      <section id="video-generation" class="section-anchor"><div class="endpoint-title"><span class="method post">POST</span><h2>/v1/videos</h2></div><p>根据文字提示词创建异步视频任务。请求必须使用 <code>multipart/form-data</code>，创建成功后请轮询任务状态。</p>
+        <table><thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>必填。视频模型 ID，例如 <code>grok-video</code>。</td></tr><tr><td><code>prompt</code></td><td>string</td><td>必填。视频描述。</td></tr><tr><td><code>seconds</code></td><td>integer</td><td>可选。支持 <code>6</code>、<code>10</code>、<code>12</code>、<code>16</code>、<code>20</code>，默认 <code>6</code>。</td></tr><tr><td><code>size</code></td><td>string</td><td>可选。<code>720x1280</code>、<code>1280x720</code>、<code>1024x1024</code>、<code>1024x1792</code>、<code>1792x1024</code>。</td></tr><tr><td><code>resolution_name</code></td><td>string</td><td>可选：<code>480p</code> 或 <code>720p</code>。</td></tr><tr><td><code>preset</code></td><td>string</td><td>可选：<code>fun</code>、<code>normal</code>、<code>spicy</code>、<code>custom</code>。</td></tr></tbody></table>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl "{{BASE_URL}}/v1/videos" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "model=grok-video" \
+  -F "prompt=一艘飞船穿过木星云层，电影级镜头运动" \
+  -F "seconds=6" \
+  -F "size=720x1280" \
+  -F "resolution_name=480p" \
+  -F "preset=normal"</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+response = requests.post(
+    "{{BASE_URL}}/v1/videos",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    data={
+        "model": "grok-video",
+        "prompt": "一艘飞船穿过木星云层，电影级镜头运动",
+        "seconds": "6", "size": "720x1280",
+        "resolution_name": "480p", "preset": "normal",
+    },
+    timeout=90,
+)
+response.raise_for_status()
+print(response.json())</code></pre></div>
+        <h3>创建任务成功响应示例</h3><pre class="response"><code>{
+  "id": "video_619f138b4d6841449a1c39b6b75617f0",
+  "object": "video",
+  "status": "queued",
+  "model": "grok-video",
+  "seconds": 6,
+  "size": "720x1280",
+  "created_at": 1787126400
+}</code></pre>
+      </section>
+
+      <section id="video-reference" class="section-anchor"><div class="endpoint-title"><span class="method post">POST</span><h2>/v1/videos（图生视频）</h2></div><p>图生视频与文生视频使用同一个接口；仅需额外提交参考图字段。</p>
+        <div class="warning"><b>注意：</b>参考图字段名为 <code>input_reference[]</code>，不是 <code>image[]</code>、<code>image_urls</code> 或 <code>reference_images</code>。最多会使用前 7 张参考图。</div>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl "{{BASE_URL}}/v1/videos" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "model=grok-video" \
+  -F "prompt=让画面中的人物自然转身并向镜头挥手" \
+  -F "seconds=6" \
+  -F "size=720x1280" \
+  -F "input_reference[]=@./reference.jpg;type=image/jpeg"</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+with open("reference.jpg", "rb") as image_file:
+    response = requests.post(
+        "{{BASE_URL}}/v1/videos",
+        headers={"Authorization": "Bearer YOUR_API_KEY"},
+        data={
+            "model": "grok-video",
+            "prompt": "让画面中的人物自然转身并向镜头挥手",
+            "seconds": "6", "size": "720x1280",
+        },
+        files={
+            "input_reference[]": ("reference.jpg", image_file, "image/jpeg"),
+        },
+        timeout=90,
+    )
+response.raise_for_status()
+print(response.json())</code></pre></div>
+        <h3>创建任务成功响应示例</h3><pre class="response"><code>{"id": "video_619f138b4d6841449a1c39b6b75617f0", "object": "video", "status": "queued", "model": "grok-video"}</code></pre>
+      </section>
+
+      <section id="video-status" class="section-anchor"><div class="endpoint-title"><span class="method get">GET</span><h2>/v1/videos/{video_id}</h2></div><p>查询异步视频任务状态。状态为 <code>completed</code> 后，使用 <a href="#download">下载媒体</a>接口获取 MP4。</p>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl "{{BASE_URL}}/v1/videos/video_619f138b4d6841449a1c39b6b75617f0" \
+  -H "Authorization: Bearer YOUR_API_KEY"</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+video_id = "video_619f138b4d6841449a1c39b6b75617f0"
+response = requests.get(
+    f"{{BASE_URL}}/v1/videos/{video_id}",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    timeout=60,
+)
+response.raise_for_status()
+print(response.json())</code></pre></div>
+        <h3>响应示例：生成中</h3><pre class="response"><code>{"id": "video_619f138b4d6841449a1c39b6b75617f0", "object": "video", "status": "in_progress", "progress": 42}</code></pre>
+        <h3>响应示例：已完成</h3><pre class="response"><code>{
+  "id": "video_619f138b4d6841449a1c39b6b75617f0",
+  "object": "video",
+  "status": "completed",
+  "content_url": "{{BASE_URL}}/v1/videos/video_619f138b4d6841449a1c39b6b75617f0/content"
+}</code></pre>
+        <h3>响应示例：失败</h3><pre class="response error-response"><code>{"id": "video_619f138b4d6841449a1c39b6b75617f0", "object": "video", "status": "failed", "error": {"message": "上游视频任务失败"}}</code></pre>
+      </section>
+
+      <section id="download" class="section-anchor"><h2>下载媒体</h2><p>图片 URL 会直接出现在图像接口成功响应中；视频任务完成后，通过视频内容接口下载。</p>
+        <div class="endpoint-title compact"><span class="method get">GET</span><h3>/v1/videos/{video_id}/content</h3></div>
+        <div class="code-card" data-example><div class="code-head"><div class="tabs"><button class="tab active" data-tab="curl">cURL</button><button class="tab" data-tab="python">Python</button></div><button class="copy" type="button">复制</button></div>
+          <pre class="code-pane active" data-lang="curl"><code>curl -L "{{BASE_URL}}/v1/videos/video_619f138b4d6841449a1c39b6b75617f0/content" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -o result.mp4</code></pre>
+          <pre class="code-pane" data-lang="python"><code>import requests
+
+response = requests.get(
+    "{{BASE_URL}}/v1/videos/video_619f138b4d6841449a1c39b6b75617f0/content",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    timeout=180,
+)
+response.raise_for_status()
+with open("result.mp4", "wb") as file:
+    file.write(response.content)</code></pre></div>
+        <p class="muted">也可使用本地缓存文件接口：<code>GET /v1/files/image?id=图片ID</code> 与 <code>GET /v1/files/video?id=video_&lt;uuid&gt;</code>。文件 ID 必须来自本服务返回的结果。</p>
+      </section>
+
+      <section id="errors" class="section-anchor"><h2>常见错误</h2><table><thead><tr><th>状态码</th><th>含义与处理</th></tr></thead><tbody><tr><td><code>400</code></td><td>参数或文件字段不符合要求。图生图请使用 <code>image[]</code>；图生视频请使用 <code>input_reference[]</code>。</td></tr><tr><td><code>401</code></td><td>未携带 API Key 或 API Key 无效。</td></tr><tr><td><code>404</code></td><td>视频/媒体 ID 不存在，或使用了错误的接口地址。</td></tr><tr><td><code>429</code></td><td>上游账号处于限流或额度不足状态。服务会按账号调度策略重试或切换账号。</td></tr><tr><td><code>500 / 502</code></td><td>上游请求或网络链路异常。请记录响应中的 <code>error.message</code>，稍后重试。</td></tr></tbody></table>
+        <h3>错误响应格式示例</h3><pre class="response error-response"><code>{
+  "error": {
+    "message": "Invalid file ID",
+    "type": "invalid_request_error",
+    "code": "invalid_value",
+    "param": "id"
+  }
+}</code></pre>
+      </section>
+      <footer>Grok2API · 本页面基于当前服务实际路由编写，模型可用性以 <code>/v1/models</code> 返回为准。</footer>
+    </main>
+  </div>
+  <script src="/static/js/api-docs.js"></script>
+</body>
+</html>

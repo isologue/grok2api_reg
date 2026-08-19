@@ -589,10 +589,16 @@ async def image_edits(
     response_format: Annotated[str, Form()] = "url",
 ):
     spec = model_registry.get(model)
-    if spec is None or not spec.enabled or not spec.is_image_edit():
+    if spec is None or not spec.enabled or not (spec.is_image_edit() or spec.is_image()):
         raise ValidationError(
-            f"Model {model!r} is not an image-edit model", param="model"
+            f"Model {model!r} is not an image or image-edit model", param="model"
         )
+
+    # Compatibility with chat-completions/WebUI: callers may keep a selected
+    # text-to-image model (notably grok-imagine-image-lite) while supplying
+    # reference files to /v1/images/edits.  The selected model still decides
+    # account-pool selection; images.edit() always builds the upstream
+    # `imagine-image-edit` protocol payload for the actual edit operation.
     if mask is not None:
         raise ValidationError("mask is not supported yet", param="mask")
     _validate_image_edit_n(n, param="n")

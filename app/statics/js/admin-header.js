@@ -10,7 +10,7 @@ window.renderAdminHeader = async function renderAdminHeader() {
       return 'v1';
     }
   })();
-  const HEADER_HTML_CACHE_REVISION = '12';
+  const HEADER_HTML_CACHE_REVISION = '13';
   const HEADER_HTML_CACHE_KEY = `grok2api.admin_header_html.${HEADER_HTML_CACHE_REVISION}.${scriptVersion}`;
   const META_VERSION_CACHE_KEY = `grok2api.meta_version.${scriptVersion}`;
   let appVersion = '';

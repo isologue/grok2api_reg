@@ -38,6 +38,12 @@ async def root():
 
 
 # --- Admin pages ---
+@router.get("/api-docs", include_in_schema=False)
+async def api_docs():
+    """面向 API 调用方的中文图像与视频接口说明页。"""
+    return _serve_html("api-docs.html")
+
+
 @router.get("/admin", include_in_schema=False)
 async def admin_root():
     return RedirectResponse("/admin/login")
