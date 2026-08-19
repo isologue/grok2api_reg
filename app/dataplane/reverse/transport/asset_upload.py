@@ -36,6 +36,41 @@ _UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
 _IMAGINE_DIRECT_UPLOAD_URL = "https://grok.com/http/upload-file-v2/direct"
 _IMAGINE_FILE_SOURCE = "IMAGINE_SELF_UPLOAD_FILE_SOURCE"
 _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
+_REGION_RESTRICTION_MARKER = "not available in your region"
+
+
+def _is_imagine_region_restricted(status_code: int, body_text: str) -> bool:
+    """Return whether Imagine rejected the configured proxy exit region.
+
+    A 403 alone is ambiguous: it can mean an expired session, a challenge, or
+    a policy rejection.  Only the explicit region message is eligible for the
+    legacy-upload fallback; authentication and anti-bot failures must remain
+    visible instead of being masked by a second request.
+    """
+    return (
+        status_code == 403
+        and _REGION_RESTRICTION_MARKER in body_text.lower()
+    )
+
+
+def _extract_uploaded_asset(result: object) -> tuple[str, str]:
+    """Extract an asset ID/URI from either current or legacy upload JSON."""
+    if not isinstance(result, dict):
+        return "", ""
+    candidates: list[dict] = [result]
+    metadata = result.get("fileMetadata")
+    if isinstance(metadata, dict):
+        candidates.insert(0, metadata)
+    for candidate in candidates:
+        file_id = str(
+            candidate.get("fileMetadataId")
+            or candidate.get("fileId")
+            or candidate.get("id")
+            or ""
+        ).strip()
+        if file_id:
+            return file_id, str(candidate.get("fileUri") or "").strip()
+    return "", ""
 
 # Global semaphore — limits concurrent upload_file() calls across all requests.
 # Initialised lazily on first call so the event loop is guaranteed to be running.
@@ -175,26 +210,57 @@ async def _upload_imagine_image_inner(
     kwargs = build_session_kwargs(lease=lease)
 
     try:
-        async with ResettableSession(**kwargs) as session:
-            response = await session.post(
-                _IMAGINE_DIRECT_UPLOAD_URL,
-                headers=headers,
-                data={"file_source": _IMAGINE_FILE_SOURCE},
-                files={"file": (filename or "image", raw, mime)},
-                timeout=timeout_s,
-            )
+        # curl_cffi does not implement httpx/requests-style ``files=``.
+        # Build a CurlMime object explicitly so it can generate the multipart
+        # boundary and Content-Disposition headers expected by Grok.
+        from curl_cffi import CurlMime
+
+        multipart = CurlMime()
+        multipart.addpart(
+            "file_source",
+            content_type="text/plain",
+            data=_IMAGINE_FILE_SOURCE.encode("utf-8"),
+        )
+        multipart.addpart(
+            "file",
+            content_type=mime,
+            filename=filename or "image",
+            data=raw,
+        )
+        try:
+            async with ResettableSession(**kwargs) as session:
+                response = await session.post(
+                    _IMAGINE_DIRECT_UPLOAD_URL,
+                    headers=headers,
+                    multipart=multipart,
+                    timeout=timeout_s,
+                )
+        finally:
+            multipart.close()
         body_bytes = response.content
         if response.status_code != 200:
             body_text = body_bytes.decode("utf-8", "replace")[:500]
-            await proxy.feedback(
-                lease,
-                build_feedback(
-                    response.status_code,
-                    is_cloudflare="just a moment" in body_text.lower(),
-                ),
+            region_restricted = _is_imagine_region_restricted(
+                response.status_code, body_text
             )
+            # A region-policy 403 is not evidence that the proxy is broken or
+            # that the account is invalid.  Do not cool down the egress node as
+            # a challenge; try the older upload endpoint through the same
+            # configured proxy instead.
+            if not region_restricted:
+                await proxy.feedback(
+                    lease,
+                    build_feedback(
+                        response.status_code,
+                        is_cloudflare="just a moment" in body_text.lower(),
+                    ),
+                )
             error = UpstreamError(
-                f"Imagine reference upload returned {response.status_code}",
+                (
+                    "Grok 参考图上传被当前代理出口地区限制（HTTP 403）"
+                    if region_restricted
+                    else f"Imagine reference upload returned {response.status_code}"
+                ),
                 status=response.status_code,
                 body=body_text,
             )
@@ -205,6 +271,36 @@ async def _upload_imagine_image_inner(
                 error=error,
                 status=error.status,
             )
+            if region_restricted:
+                logger.warning(
+                    "Imagine 参考图直传被代理出口地区限制，尝试兼容上传接口：filename={!r}",
+                    filename,
+                )
+                try:
+                    legacy_id, legacy_uri = await _upload_file_inner(
+                        token,
+                        filename,
+                        mime,
+                        base64.b64encode(raw).decode("ascii"),
+                    )
+                    if legacy_id:
+                        logger.info(
+                            "Imagine 参考图已通过兼容上传接口完成：filename={!r} file_id={}",
+                            filename,
+                            legacy_id,
+                        )
+                        return legacy_id, legacy_uri
+                    raise UpstreamError("兼容上传接口未返回文件 ID")
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "Imagine 参考图兼容上传接口也失败：{}",
+                        fallback_exc,
+                    )
+                    raise UpstreamError(
+                        "Grok 参考图上传失败：当前代理出口地区不支持 Imagine 直传，兼容上传接口也未成功；请更换配置的代理出口地区",
+                        status=error.status,
+                        body=body_text,
+                    ) from fallback_exc
             raise error
 
         try:
@@ -325,9 +421,13 @@ async def _upload_file_inner(
             ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
         )
 
-        result   = orjson.loads(body_bytes)
-        file_id  = result.get("fileMetadataId") or result.get("fileId", "")
-        file_uri = result.get("fileUri", "")
+        try:
+            result = orjson.loads(body_bytes)
+        except Exception as exc:
+            raise UpstreamError("Asset upload returned invalid JSON") from exc
+        file_id, file_uri = _extract_uploaded_asset(result)
+        if not file_id:
+            raise UpstreamError("Asset upload returned no file ID")
         finish_upstream_trace(
             trace_id,
             account_token=token,
@@ -338,7 +438,17 @@ async def _upload_file_inner(
         logger.info("asset upload completed: filename={!r} file_id={}", filename, file_id)
         return file_id, file_uri
 
-    except UpstreamError:
+    except UpstreamError as error:
+        # HTTP failures are traced at the response branch above.  Structural
+        # failures (invalid JSON or a missing ID) still need an audit record.
+        if not error.details.get("body"):
+            fail_upstream_trace(
+                trace_id,
+                account_token=token,
+                endpoint=_UPLOAD_URL,
+                error=error,
+                status=error.status,
+            )
         raise
     except Exception as exc:
         await proxy.feedback(
