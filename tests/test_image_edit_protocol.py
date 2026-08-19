@@ -1,6 +1,7 @@
 import unittest
 
 from app.dataplane.reverse.protocol.xai_image_edit import build_image_edit_payload
+from app.products.openai.images import _normalize_edit_size
 
 
 class ImageEditProtocolTests(unittest.TestCase):
@@ -25,6 +26,13 @@ class ImageEditProtocolTests(unittest.TestCase):
         )
         self.assertNotIn("imageReferences", str(payload))
         self.assertNotIn("parentPostId", str(payload))
+
+    def test_edit_size_is_accepted_without_local_1024_square_restriction(self) -> None:
+        # The browser's image-to-image protocol has no size field.  Accept
+        # OpenAI/canvas sizes rather than rejecting non-square references here.
+        self.assertEqual(_normalize_edit_size("1536x1024"), "1536x1024")
+        self.assertEqual(_normalize_edit_size("720x1280"), "720x1280")
+        self.assertEqual(_normalize_edit_size("16:9"), "16:9")
 
 
 if __name__ == "__main__":

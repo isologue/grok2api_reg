@@ -729,14 +729,17 @@ def _normalize_edit_inputs(image_inputs: list[str]) -> list[str]:
 
 
 def _normalize_edit_size(size: str) -> str:
-    """Validate the only upstream-backed image-edit size."""
+    """Normalize a caller-provided edit size without imposing a fake limit.
+
+    The current Grok ``imagine-image-edit`` browser protocol does not include a
+    size/aspect-ratio field in its image-to-image payload.  The web UI therefore
+    does not enforce a 1024x1024-only restriction either.  Keep accepting the
+    OpenAI-compatible ``size`` form field (including canvas-specific values),
+    but do not reject it locally merely because this upstream operation chooses
+    the final image shape itself.
+    """
     normalized = (size or _EDIT_DEFAULT_SIZE).strip().lower()
-    if normalized != _EDIT_DEFAULT_SIZE:
-        raise ValidationError(
-            f"image edit currently only supports size {_EDIT_DEFAULT_SIZE!r}",
-            param="size",
-        )
-    return _EDIT_DEFAULT_SIZE
+    return normalized or _EDIT_DEFAULT_SIZE
 
 
 async def _prepare_edit_reference(
