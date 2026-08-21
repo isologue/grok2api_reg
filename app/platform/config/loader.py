@@ -31,11 +31,33 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def load_toml(path: Path) -> dict[str, Any]:
-    """Load a TOML file and return the raw nested dict."""
+    """Load a TOML file and add file context to malformed-config errors."""
     if not path.exists():
         return {}
-    with open(path, "rb") as fh:
-        return tomllib.load(fh)
+
+    try:
+        raw = path.read_bytes()
+        # TOML files are UTF-8. Read the bytes ourselves so the diagnostic can
+        # include a safe prefix without ever logging secrets or full content.
+        text = raw.decode("utf-8")
+        return tomllib.loads(text)
+    except UnicodeDecodeError as exc:
+        preview = _hex_preview(raw)
+        raise RuntimeError(
+            f"Invalid UTF-8 in TOML config: {path} "
+            f"(first bytes: {preview})"
+        ) from exc
+    except tomllib.TOMLDecodeError as exc:
+        preview = _hex_preview(raw)
+        raise RuntimeError(
+            f"Invalid TOML config: {path} ({exc}; "
+            f"first bytes: {preview})"
+        ) from exc
+
+
+def _hex_preview(raw: bytes, limit: int = 16) -> str:
+    """Return a short, secret-safe byte preview for config diagnostics."""
+    return raw[:limit].hex(" ") or "<empty>"
 
 
 def load_config(

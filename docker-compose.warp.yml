@@ -2,6 +2,9 @@ services:
   # ── Init: 写入代理配置到 config.toml ──────────────────────────────────────
   init-config:
     image: python:3.13-alpine
+    environment:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     volumes:
       - ./data:/app/data
       - ./scripts:/scripts:ro

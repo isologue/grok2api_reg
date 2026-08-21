@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
-import tomllib
 
 from .base import ConfigBackend
 from ..loader import _deep_merge as deep_merge
+from ..loader import load_toml
 
 
 class TomlConfigBackend(ConfigBackend):
@@ -35,14 +35,10 @@ class TomlConfigBackend(ConfigBackend):
         return _mtime(self._path)
 
     def _read(self) -> dict[str, Any]:
-        with open(self._path, "rb") as fh:
-            return tomllib.load(fh)
+        return load_toml(self._path)
 
     def _merge_write(self, patch: dict[str, Any]) -> None:
-        existing = {}
-        if self._path.exists():
-            with open(self._path, "rb") as fh:
-                existing = tomllib.load(fh)
+        existing = load_toml(self._path)
         merged = deep_merge(existing, patch)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "wb") as fh:
