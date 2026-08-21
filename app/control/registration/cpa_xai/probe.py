@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from app.control.model_utils import extract_model_ids
+
 from .proxyutil import resolve_proxy
 from .schema import DEFAULT_BASE_URL, DEFAULT_CLIENT_HEADERS
 
@@ -51,7 +53,7 @@ def probe_models(
     try:
         with opener.open(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-            ids = [x.get("id") for x in body.get("data") or [] if isinstance(x, dict)]
+            ids = extract_model_ids(body)
             return {
                 "ok": True,
                 "status": getattr(resp, "status", 200),

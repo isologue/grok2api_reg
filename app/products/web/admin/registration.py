@@ -417,15 +417,23 @@ async def retry_cpa_auth_for_account(
             if resolved_email:
                 task["email"] = resolved_email
             probe = result.get("probe_models") if isinstance(result.get("probe_models"), dict) else {}
-            model_ids = [str(item) for item in (probe.get("model_ids") or []) if str(item)]
+            model_ids = [
+                str(item)
+                for item in (probe.get("model_ids") or result.get("model_ids") or [])
+                if str(item)
+            ]
             task["models"] = model_ids
-            if bool(cpa.get("auto_import_build", True)) and model_ids and result.get("path"):
+            # CPA export success must not depend on the optional /models probe.
+            # Import the OAuth account even when the probe is empty, then let a
+            # later model sync fill in the model list.
+            if bool(cpa.get("auto_import_build", True)) and result.get("path"):
                 try:
                     from app.control.build import import_cpa_auth_file
                     from app.control.build.routes import store as build_routes
 
                     import_cpa_auth_file(str(result["path"]), model_ids=model_ids)
-                    build_routes.sync_discovered(model_ids)
+                    if model_ids:
+                        build_routes.sync_discovered(model_ids)
                     task["build_imported"] = True
                 except Exception as exc:  # noqa: BLE001
                     task["message"] = f"CPA Auth \u5df2\u5bfc\u51fa\uff0c\u4f46\u81ea\u52a8\u5bfc\u5165 Build \u8d26\u53f7\u6c60\u5931\u8d25\uff1a{type(exc).__name__}: {exc}"[:500]
@@ -434,6 +442,8 @@ async def retry_cpa_auth_for_account(
                     return
             task["state"] = "completed"
             message = "CPA Auth \u5df2\u5bfc\u51fa\u5e76\u5bfc\u5165 Build \u8d26\u53f7\u6c60" if task["build_imported"] else "CPA Auth \u5df2\u5bfc\u51fa"
+            if task["build_imported"] and not model_ids:
+                message += "(\u6a21\u578b\u63a2\u6d4b\u4e3a\u7a7a\uff0c\u7b49\u5f85\u540e\u7eed\u540c\u6b65)"
             if task["sso_rotated"]:
                 message += "\uff0c\u666e\u901a\u8d26\u53f7\u6c60 SSO \u5df2\u66f4\u65b0"
             task["message"] = message

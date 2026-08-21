@@ -215,14 +215,24 @@ def mint_and_export(
     if probe:
         pr = probe_models(tokens["access_token"], base_url=base_url, proxy=resolved or None)
         result["probe_models"] = pr
+        # The CPA JSON is already valid at this point. Model probing only
+        # enriches the Build pool and must never turn a successful mint into a
+        # failed export.
+        result["model_ids"] = list(pr.get("model_ids") or [])
+        result["model_probe_ok"] = bool(pr.get("ok"))
+        result["model_probe_error"] = str(pr.get("error") or "")
         log(
             f"probe models: ok={pr.get('ok')} status={pr.get('status')} "
             f"has_grok_45={pr.get('has_grok_45')} ids={pr.get('model_ids')} "
             f"error={str(pr.get('error') or '')[:200]}"
         )
-        if not pr.get("has_build_model", bool(pr.get("model_ids"))):
-            result["ok"] = False
-            result["error"] = "token ok but no Build model listed"
+        if not pr.get("ok"):
+            log(
+                "probe warning ignored: CPA OAuth 已写入，模型探测失败，"
+                f"后续可从 Build 账号池手动同步（{str(pr.get('error') or pr.get('status') or 'unknown')[:200]}）"
+            )
+        elif not result["model_ids"]:
+            log("probe warning ignored: CPA OAuth 已写入，但 /models 未返回模型元数据")
         if probe_chat and pr.get("has_grok_45"):
             ch = probe_mini_response(
                 tokens["access_token"], base_url=base_url, proxy=resolved or None
@@ -230,6 +240,9 @@ def mint_and_export(
             result["probe_chat"] = ch
             log(f"probe chat: ok={ch.get('ok')} model={ch.get('model')} text={ch.get('text')!r}")
             if not ch.get("ok"):
-                result["ok"] = False
-                result["error"] = f"chat probe failed: {ch.get('error') or ch.get('status')}"
+                # Chat probing is an optional health check. A temporary
+                # upstream failure must not discard a freshly minted CPA Auth
+                # file or prevent its Build-pool import.
+                result["chat_probe_error"] = f"{ch.get('error') or ch.get('status')}"
+                log(f"probe warning ignored: chat probe failed: {result['chat_probe_error'][:200]}")
     return result

@@ -18,6 +18,12 @@ from .console import install_console
 install_console()
 from DrissionPage import Chromium, ChromiumOptions
 
+from .browser_proxy import (
+    Socks5AuthenticatedBridge,
+    create_proxy_auth_extension,
+    parse_browser_proxy,
+    remove_proxy_auth_extension,
+)
 from .cpa_queue import CpaExportQueue
 from .mail import MAILBOX_EXHAUSTED_EXIT_CODE, MailboxPool, MailboxUnavailableError, OutlookTokenError, VerificationCodeTimeout
 
@@ -35,14 +41,34 @@ class BrowserRegistration:
         self.page = None
         self.user_data_dir = ""
         self.virtual_display = None
+        self.proxy_auth_extension_dir = ""
+        self.proxy_bridge: Socks5AuthenticatedBridge | None = None
         self.mail_pool = MailboxPool(config["mail"]["providers"], str(config.get("proxy") or ""))
         self.options = ChromiumOptions()
         for argument in ("--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-software-rasterizer"):
             self.options.set_argument(argument)
-        proxy = str(config.get("browser_proxy") or config.get("proxy") or "").strip()
-        if proxy:
-            self.options.set_proxy(proxy)
-            print("[browser] 已配置浏览器代理", flush=True)
+        proxy_value = str(config.get("browser_proxy") or config.get("proxy") or "").strip()
+        browser_proxy = parse_browser_proxy(proxy_value)
+        if browser_proxy:
+            chrome_proxy = browser_proxy.chromium_url
+            if browser_proxy.has_auth and browser_proxy.chromium_scheme == "socks5":
+                # Chromium does not reliably pass RFC 1929 credentials for a
+                # SOCKS5 proxy. A local bridge authenticates upstream without
+                # putting secrets in Chromium command-line arguments.
+                self.proxy_bridge = Socks5AuthenticatedBridge(browser_proxy)
+                chrome_proxy = self.proxy_bridge.start()
+                auth_label = "（已启用 SOCKS5 账号密码转发）"
+            elif browser_proxy.has_auth and browser_proxy.chromium_scheme == "socks4":
+                raise ValueError("带账号密码的 SOCKS4 代理不受支持，请使用 SOCKS5 或 HTTP(S) 代理")
+            elif browser_proxy.has_auth:
+                # HTTP(S) authentication uses a browser proxy-auth challenge.
+                self.proxy_auth_extension_dir = create_proxy_auth_extension(browser_proxy)
+                self.options.add_extension(self.proxy_auth_extension_dir)
+                auth_label = "（已启用账号密码认证）"
+            else:
+                auth_label = ""
+            self.options.set_argument(f"--proxy-server={chrome_proxy}")
+            print(f"[browser] 已配置 {browser_proxy.log_label} 代理{auth_label}", flush=True)
         browser_paths = (
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
@@ -118,6 +144,11 @@ class BrowserRegistration:
 
     def close(self) -> None:
         self._close_browser()
+        remove_proxy_auth_extension(self.proxy_auth_extension_dir)
+        self.proxy_auth_extension_dir = ""
+        if self.proxy_bridge:
+            self.proxy_bridge.close()
+            self.proxy_bridge = None
         self.mail_pool.close()
         if self.virtual_display:
             try:

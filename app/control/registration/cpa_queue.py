@@ -53,14 +53,27 @@ class CpaExportQueue:
         if result.get("ok"):
             print(f"[cpa] OIDC export completed: {result.get('path')}", flush=True)
             probe = result.get("probe_models") if isinstance(result.get("probe_models"), dict) else {}
-            model_ids = [str(item) for item in (probe.get("model_ids") or []) if str(item)]
-            if bool(self._cpa.get("auto_import_build", True)) and model_ids and result.get("path"):
+            model_ids = [
+                str(item)
+                for item in (probe.get("model_ids") or result.get("model_ids") or [])
+                if str(item)
+            ]
+            # A CPA file is the source of truth for the Build account. Model
+            # probing is optional metadata and may be empty while /models is
+            # unavailable or its response shape is changing. Do not discard
+            # the account just because the probe returned no IDs.
+            if bool(self._cpa.get("auto_import_build", True)) and result.get("path"):
                 try:
                     from app.control.build import import_cpa_auth_file
                     imported = import_cpa_auth_file(str(result["path"]), model_ids=model_ids)
-                    from app.control.build.routes import store as build_routes
-                    created_routes = build_routes.sync_discovered(model_ids)
-                    print(f"[Build] CPA OAuth auto-imported: email={account.get('email') or ''} result={imported} routes_added={created_routes}", flush=True)
+                    created_routes = 0
+                    if model_ids:
+                        from app.control.build.routes import store as build_routes
+                        created_routes = build_routes.sync_discovered(model_ids)
+                    if model_ids:
+                        print(f"[Build] CPA OAuth auto-imported: email={account.get('email') or ''} models={','.join(model_ids)} result={imported} routes_added={created_routes}", flush=True)
+                    else:
+                        print(f"[Build] CPA OAuth imported without model metadata; pending model sync: email={account.get('email') or ''} result={imported}", flush=True)
                 except Exception as exc:
                     print(f"[Build] CPA OAuth auto-import failed (export preserved): {type(exc).__name__}: {exc}", flush=True)
         elif not result.get("skipped"):

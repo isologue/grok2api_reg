@@ -10,6 +10,7 @@ from typing import Any
 import orjson
 
 from app.control.build.accounts import BuildAccount, refresh_account
+from app.control.model_utils import extract_model_ids
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
 from app.platform.errors import UpstreamError
@@ -94,7 +95,11 @@ async def fetch_models(account: BuildAccount) -> list[str]:
         fail_upstream_trace(trace_id, account_token=account.access_token, endpoint=endpoint, error=error, status=response.status_code)
         raise error
     data = orjson.loads(response.content)
-    models = sorted({str(item.get("id") or "").strip() for item in data.get("data") or [] if isinstance(item, dict) and str(item.get("id") or "").strip()})
+    # The Build endpoint has returned several response shapes over time
+    # (data[], models[], nested data.models, and result.data). Keep model
+    # synchronization in lockstep with CPA mint probing so a model rename such
+    # as grok-4.6 does not make a valid account disappear.
+    models = sorted(extract_model_ids(data))
     finish_upstream_trace(trace_id, account_token=account.access_token, endpoint=endpoint, response={"models": models}, completed=True)
     return models
 

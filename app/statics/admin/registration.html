@@ -38,7 +38,7 @@
         <div class="field"><label for="account-pool">导入账号池</label><select id="account-pool"><option value="basic">basic</option><option value="super">super</option><option value="heavy">heavy</option></select><div class="hint">将使用现有账号管理接口导入，不会覆盖已存在账号。</div></div>
         <div class="field full"><label for="account-tags">导入标签</label><input id="account-tags" placeholder="registered, grok"><div class="hint">以英文逗号分隔。默认建议保留 <code>registered</code> 方便筛选。</div></div>
         <div class="field"><label for="proxy">邮箱 API 代理（可选）</label><input id="proxy" placeholder="http://127.0.0.1:7890"></div>
-        <div class="field"><label for="browser-proxy">浏览器代理（可选）</label><input id="browser-proxy" placeholder="http://proxy:port 或 socks5://proxy:port"></div>
+        <div class="field"><label for="browser-proxy">浏览器代理（可选）</label><input id="browser-proxy" placeholder="http://账号:密码@主机:端口 或 socks5://账号:密码@主机:端口"><div class="hint">支持 HTTP/HTTPS/SOCKS5；带账号密码的 SOCKS5 会自动通过本地安全转发连接。</div></div>
       </div>
       <div class="section-title">CPA / OIDC 导出（Grok 4.5）</div>
       <div class="field-grid">
