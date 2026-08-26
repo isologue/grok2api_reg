@@ -462,15 +462,13 @@ class RemailProvider(_MailboxProvider):
     def list_projects(api_base: str, api_key: str, proxy: str = "") -> list[dict[str, Any]]:
         """Return every code-enabled Remail project and its selectable suffixes.
 
-        The public project catalogue lives under ``/v1/projects`` rather than
-        the order-scoped ``/v1/open`` namespace.  It is offset-paginated, so a
-        single request only returns the server default page (currently 20).
-        Read every listed/visible page before filtering it for code-enabled
-        products.  The project endpoint is public, so the configured API
-        token is intentionally not sent on this request; it remains required
-        later for paid order creation.  The caller receives a sanitised
-        project/suffix list only, and neither the API key nor any order-level
-        service token is retained.
+        The Open API project catalogue is under ``/v1/open/projects`` and
+        requires the configured bearer token.  It is offset-paginated, so a
+        request without ``limit`` returns the server default page (currently
+        20).  Read every listed/visible page before filtering it for
+        code-enabled products.  The caller receives a sanitised project/suffix
+        list only, and neither the API key nor any order-level service token is
+        retained.
         """
         base_url = str(api_base or "https://remail.aishop6.com").strip().rstrip("/")
         secret = str(api_key or "").strip()
@@ -487,10 +485,11 @@ class RemailProvider(_MailboxProvider):
         try:
             for _page in range(100):
                 response = session.get(
-                    f"{base_url}/v1/projects",
+                    f"{base_url}/v1/open/projects",
                     params={"scope": "visible", "status": "listed", "offset": offset, "limit": page_limit},
                     headers={
                         "Accept": "application/json",
+                        "Authorization": f"Bearer {secret}",
                         "User-Agent": "Mozilla/5.0 (compatible; Grok2API/1.0)",
                     },
                     timeout=30,
