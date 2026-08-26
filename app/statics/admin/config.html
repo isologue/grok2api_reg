@@ -195,6 +195,15 @@
       pointer-events:none;
     }
     .cfg-inline-action svg { width:14px; height:14px; display:block }
+    .cfg-proxy-input-wrap { width:100%; min-width:0; display:flex; flex-direction:column; gap:6px }
+    .cfg-proxy-input-line { width:100%; min-width:0; display:flex; align-items:center; gap:7px }
+    .cfg-proxy-input-line > input, .cfg-proxy-input-line > textarea { flex:1; min-width:0 }
+    .cfg-proxy-test-btn { flex:0 0 auto; height:30px; padding:0 10px; border:1px solid #e5e5e5; border-radius:8px; background:#fff; color:#555; font:12px inherit; cursor:pointer; white-space:nowrap; transition:background .15s,border-color .15s,color .15s }
+    .cfg-proxy-test-btn:hover { background:#f5f5f5; border-color:#d5d5d5; color:#111 }
+    .cfg-proxy-test-btn:disabled { opacity:.55; cursor:wait }
+    .cfg-proxy-test-result { min-height:16px; color:#777; font-size:11px; line-height:1.4; text-align:right; white-space:pre-wrap; overflow-wrap:anywhere }
+    .cfg-proxy-test-result.ok { color:#16794a }
+    .cfg-proxy-test-result.error { color:#b42318 }
 
     /* Inputs */
     .cfg-text {
@@ -630,6 +639,7 @@ const SCHEMA_DEF = [
             label: '基础代理 URL',
             labelKey: 'config.schema.fields.proxyUrl.label',
             type: 'text',
+            proxyTest: 'single',
             wide: true,
             desc: 'API 流量的出站代理地址，支持 http、https、socks5 协议。',
             descKey: 'config.schema.fields.proxyUrl.desc',
@@ -640,6 +650,7 @@ const SCHEMA_DEF = [
             label: '资源代理 URL',
             labelKey: 'config.schema.fields.resourceProxyUrl.label',
             type: 'text',
+            proxyTest: 'single',
             wide: true,
             desc: '图片、视频等媒体资源下载的专用代理地址；留空时回落至基础代理。',
             descKey: 'config.schema.fields.resourceProxyUrl.desc',
@@ -650,6 +661,7 @@ const SCHEMA_DEF = [
             label: '基础代理池',
             labelKey: 'config.schema.fields.proxyPool.label',
             type: 'textarea',
+            proxyTest: 'pool',
             desc: 'API 流量代理池，每行一个代理 URL，请求时轮转使用。',
             descKey: 'config.schema.fields.proxyPool.desc',
             showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
@@ -659,6 +671,7 @@ const SCHEMA_DEF = [
             label: '资源代理池',
             labelKey: 'config.schema.fields.resourceProxyPool.label',
             type: 'textarea',
+            proxyTest: 'pool',
             desc: '媒体资源下载专用代理池，每行一个代理 URL；留空时回落至基础代理池。',
             descKey: 'config.schema.fields.resourceProxyPool.desc',
             showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
@@ -1069,6 +1082,42 @@ document.addEventListener('click', (event) => {
   if (!event.target.closest?.('.cfg-help')) _hideHelpTip();
 });
 
+async function _testProxyValue(value, button, result, mode) {
+  const values = mode === 'pool'
+    ? String(value || '').split(/\r?\n/).map(v => v.trim()).filter(Boolean)
+    : [String(value || '').trim()];
+  if (!values.length || !values[0]) {
+    result.className = 'cfg-proxy-test-result error';
+    result.textContent = '请先填写代理地址';
+    return;
+  }
+  button.disabled = true;
+  result.className = 'cfg-proxy-test-result';
+  result.textContent = mode === 'pool' ? `正在测试 ${values.length} 个代理…` : '正在测试代理…';
+  try {
+    const outcomes = [];
+    for (const proxy of values) {
+      try {
+        outcomes.push(await _api('POST', '/proxy/test', { proxy }));
+      } catch (e) {
+        outcomes.push({ ok: false, message: e.message || '请求失败' });
+      }
+    }
+    const passed = outcomes.filter(item => item && item.ok).length;
+    const lines = outcomes.map((item, index) => {
+      const prefix = mode === 'pool' ? `${index + 1}. ` : '';
+      const timing = item.elapsed_ms != null ? `（${item.elapsed_ms} ms）` : '';
+      return `${prefix}${item.message || (item.ok ? '代理已连通' : '代理连接失败')}${timing}`;
+    });
+    result.className = `cfg-proxy-test-result ${passed === outcomes.length ? 'ok' : 'error'}`;
+    result.textContent = mode === 'pool'
+      ? `测试完成：${passed}/${outcomes.length} 个代理可用\n${lines.join('\n')}`
+      : lines[0];
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderInput(field, section, value) {
   const fp = _fullPath(section, field.key);
 
@@ -1220,7 +1269,23 @@ function renderRow(field, section, tabId) {
     _el('div', { class: 'cfg-label' }, labelChildren),
     field.desc ? _el('div', { class: 'cfg-desc' }, field.desc) : null,
   );
-  const inputCol = _el('div', { class: `cfg-input-col${field.type === 'bool' ? ' is-bool' : ''}` }, input);
+  let inputCol;
+  if (field.proxyTest) {
+    const result = _el('div', { class: 'cfg-proxy-test-result' });
+    const button = _el('button', {
+      class: 'cfg-proxy-test-btn',
+      type: 'button',
+      textContent: field.proxyTest === 'pool' ? '测试代理池' : '测试代理',
+      onclick: () => {
+        const control = input.matches?.('input,textarea,select') ? input : input.querySelector?.('input,textarea,select');
+        _testProxyValue(control?.value || '', button, result, field.proxyTest);
+      },
+    });
+    const line = _el('div', { class: 'cfg-proxy-input-line' }, input, button);
+    inputCol = _el('div', { class: 'cfg-input-col' }, _el('div', { class: 'cfg-proxy-input-wrap' }, line, result));
+  } else {
+    inputCol = _el('div', { class: `cfg-input-col${field.type === 'bool' ? ' is-bool' : ''}` }, input);
+  }
 
   const row = _el('div', {
     class: `cfg-row${isDirty ? ' modified' : ''}`,

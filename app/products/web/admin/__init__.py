@@ -169,6 +169,7 @@ from .logs import router as _logs_router  # noqa: E402
 from .registration import router as _registration_router  # noqa: E402
 from .build import router as _build_router  # noqa: E402
 from .audits import router as _audits_router  # noqa: E402
+from .proxy import router as _proxy_router  # noqa: E402
 
 router.include_router(_tokens_router)
 router.include_router(_batch_router)
@@ -178,6 +179,7 @@ router.include_router(_logs_router)
 router.include_router(_registration_router)
 router.include_router(_build_router)
 router.include_router(_audits_router)
+router.include_router(_proxy_router)
 
 
 # ---------------------------------------------------------------------------
