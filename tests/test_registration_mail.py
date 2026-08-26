@@ -180,7 +180,7 @@ class RemailProviderTests(unittest.TestCase):
         create_session.assert_called_once_with("http://proxy:8080")
         self.assertEqual(session.get.call_args.args[0], "https://remail.example.test/v1/projects")
         self.assertEqual(session.get.call_args.kwargs["params"], {"scope": "visible", "status": "listed", "offset": 0, "limit": 100})
-        self.assertEqual(session.get.call_args.kwargs["headers"]["Authorization"], "Bearer rk-test-key")
+        self.assertNotIn("Authorization", session.get.call_args.kwargs["headers"])
         session.close.assert_called_once()
 
     def test_list_projects_reads_all_offset_pages(self) -> None:
