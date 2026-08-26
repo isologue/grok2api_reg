@@ -446,6 +446,242 @@ class CloudflareTempMailProvider(_MailboxProvider):
     def close(self) -> None:
         self.session.close()
 
+class RemailProvider(_MailboxProvider):
+    """Remail Open API adapter for paid, order-scoped verification mailboxes.
+
+    Remail API keys authenticate against the ``/v1/open`` namespace.  A code
+    order returns a delivery address and an order number; subsequent reads of
+    that order expose ``verificationCode`` once the provider receives mail.
+    The per-mailbox context stores only the order number, never the API key or
+    Remail's service token.
+    """
+
+    poll_interval_seconds = 4.0
+
+    @staticmethod
+    def list_projects(api_base: str, api_key: str, proxy: str = "") -> list[dict[str, Any]]:
+        """Return every code-enabled Remail project and its selectable suffixes.
+
+        The public project catalogue lives under ``/v1/projects`` rather than
+        the order-scoped ``/v1/open`` namespace.  It is offset-paginated, so a
+        single request only returns the server default page (currently 20).
+        Read every listed/visible page before filtering it for code-enabled
+        products.  The caller receives a sanitised project/suffix list only;
+        neither the API key nor any order-level service token is retained.
+        """
+        base_url = str(api_base or "https://remail.aishop6.com").strip().rstrip("/")
+        secret = str(api_key or "").strip()
+        if not base_url:
+            raise RuntimeError("Remail API URL is required")
+        if not secret:
+            raise RuntimeError("Remail API Token is required")
+
+        page_limit = 100
+        offset = 0
+        expected_total: int | None = None
+        raw_projects: list[dict[str, Any]] = []
+        session = _create_session(proxy)
+        try:
+            for _page in range(100):
+                response = session.get(
+                    f"{base_url}/v1/projects",
+                    params={"scope": "visible", "status": "listed", "offset": offset, "limit": page_limit},
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {secret}",
+                        "User-Agent": "Mozilla/5.0 (compatible; Grok2API/1.0)",
+                    },
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    body = str(getattr(response, "text", "") or "").replace("\n", " ").strip()[:240]
+                    raise RuntimeError(
+                        f"Remail project list request failed: HTTP {response.status_code}"
+                        f"{f', body={body}' if body else ''}"
+                    )
+                try:
+                    payload = response.json()
+                except Exception as exc:
+                    raise RuntimeError("Remail project list returned invalid JSON") from exc
+                if not isinstance(payload, dict):
+                    raise RuntimeError("Remail project list returned a non-object payload")
+
+                container: dict[str, Any] = payload
+                if isinstance(payload.get("data"), dict):
+                    container = payload["data"]
+                raw_items = container.get("items")
+                if not isinstance(raw_items, list) and isinstance(payload.get("data"), list):
+                    raw_items = payload["data"]
+                if not isinstance(raw_items, list):
+                    raise RuntimeError("Remail project list did not include projects")
+                raw_projects.extend(item for item in raw_items if isinstance(item, dict))
+
+                if expected_total is None:
+                    try:
+                        expected_total = max(0, int(container.get("total") or payload.get("total") or 0)) or None
+                    except (TypeError, ValueError):
+                        expected_total = None
+                page_count = len(raw_items)
+                offset += page_count
+                if page_count == 0 or page_count < page_limit or (expected_total is not None and offset >= expected_total):
+                    break
+            else:
+                raise RuntimeError("Remail project list pagination exceeded 100 pages")
+        finally:
+            session.close()
+
+        projects: list[dict[str, Any]] = []
+        seen_project_ids: set[int] = set()
+        for project in raw_projects:
+            try:
+                project_id = int(project.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if project_id <= 0 or project_id in seen_project_ids:
+                continue
+            seen_project_ids.add(project_id)
+            suffixes: dict[str, dict[str, Any]] = {}
+            for product in project.get("products") or []:
+                if not isinstance(product, dict):
+                    continue
+                if str(product.get("status") or "").strip().lower() != "enabled" or not bool(product.get("codeEnabled")):
+                    continue
+                for item in product.get("suffixes") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    suffix = str(item.get("suffix") or "").strip().lower()
+                    if not suffix:
+                        continue
+                    try:
+                        total_available = max(0, int(item.get("totalAvailable") or 0))
+                    except (TypeError, ValueError):
+                        total_available = 0
+                    try:
+                        public_available = max(0, int(item.get("publicAvailable") or 0))
+                    except (TypeError, ValueError):
+                        public_available = 0
+                    existing = suffixes.get(suffix)
+                    if existing is None or total_available > int(existing.get("total_available") or 0):
+                        suffixes[suffix] = {
+                            "suffix": suffix,
+                            "total_available": total_available,
+                            "public_available": public_available,
+                        }
+            if suffixes:
+                projects.append({
+                    "id": project_id,
+                    "name": str(project.get("name") or f"Project {project_id}").strip()[:160],
+                    "suffixes": sorted(suffixes.values(), key=lambda item: (-int(item["total_available"]), item["suffix"])),
+                })
+        return sorted(projects, key=lambda item: (str(item["name"]).casefold(), int(item["id"])))
+
+    def __init__(self, entry: dict[str, Any], proxy: str = "") -> None:
+        self.name = str(entry.get("name") or "Remail")
+        self.base_url = str(entry.get("api_base") or "https://remail.aishop6.com").strip().rstrip("/")
+        self.api_key = str(entry.get("api_key") or "").strip()
+        try:
+            self.project_id = int(entry.get("project_id") or 0)
+        except (TypeError, ValueError):
+            self.project_id = 0
+        self.email_suffix = str(entry.get("email_suffix") or "").strip().lower()
+        self.supply = str(entry.get("supply") or "private_first").strip().lower()
+        if self.supply not in {"private_first", "public_only"}:
+            self.supply = "private_first"
+        if not self.base_url or not self.api_key:
+            raise RuntimeError(f"Mailbox provider {self.name} requires an API base URL and API key")
+        if self.project_id <= 0 or not self.email_suffix:
+            raise RuntimeError(f"Mailbox provider {self.name} requires a project ID and email suffix")
+        self.session = _create_session(proxy)
+        self.session.headers.update({
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": "Mozilla/5.0 (compatible; Grok2API/1.0)",
+        })
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        expected: tuple[int, ...] = (200,),
+    ) -> dict[str, Any]:
+        response = self.session.request(
+            method.upper(),
+            f"{self.base_url}{path}",
+            params=params,
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+        if response.status_code not in expected:
+            body = str(getattr(response, "text", "") or "").replace("\n", " ").strip()[:240]
+            raise RuntimeError(
+                f"Remail request failed: {method} {path}, HTTP {response.status_code}"
+                f"{f', body={body}' if body else ''}"
+            )
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Remail {method} {path} returned invalid JSON") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Remail {method} {path} returned a non-object payload")
+        return data
+
+    @staticmethod
+    def _order_no(provider_token: str) -> str:
+        try:
+            context = json.loads(provider_token)
+        except (TypeError, ValueError):
+            context = {}
+        if isinstance(context, dict):
+            return str(context.get("order_no") or "").strip()
+        return ""
+
+    def create_mailbox(self) -> dict[str, str]:
+        order = self._request(
+            "POST",
+            "/v1/open/orders",
+            params={"serviceMode": "code", "supply": self.supply},
+            payload={"projectId": self.project_id, "emailSuffix": self.email_suffix},
+            headers={"Idempotency-Key": f"grok2api-{secrets.token_hex(16)}"},
+            expected=(200, 201),
+        )
+        address = str(order.get("deliveryEmail") or "").strip()
+        order_no = str(order.get("orderNo") or "").strip()
+        status = str(order.get("status") or "").strip().lower()
+        if not address or not order_no or status in {"failed", "closed", "refunded"}:
+            failure = str(order.get("failureCode") or status or "unknown")
+            raise RuntimeError(f"Remail did not allocate an active mailbox: {failure}")
+        return {
+            "address": address,
+            "token": json.dumps({"order_no": order_no}, separators=(",", ":")),
+        }
+
+    def list_messages(self, address: str, provider_token: str = "") -> list[dict[str, Any]]:
+        order_no = self._order_no(provider_token)
+        if not order_no:
+            raise RuntimeError("Remail mailbox context is missing an order number")
+        order = self._request("GET", f"/v1/open/orders/{order_no}")
+        code = str(order.get("verificationCode") or "").strip()
+        if not code:
+            return []
+        received_at = str(order.get("lastMailReceivedAt") or order.get("updatedAt") or "")
+        return [{
+            "id": f"remail:{order_no}:{code}:{received_at}",
+            "subject": "Verification code",
+            "content": f"Verification code: {code}",
+        }]
+
+    def message_content(self, message_id: str, provider_token: str = "") -> str:
+        return ""
+
+    def close(self) -> None:
+        self.session.close()
+
+
 class TempMailLolProvider(_MailboxProvider):
     """TempMail.lol v2 inbox API, modelled after chatgpt2api's provider."""
 
@@ -1170,7 +1406,7 @@ class MailboxPool:
         enabled = [p for p in providers if bool(p.get("enabled", True))]
         if not enabled:
             raise RuntimeError("At least one mailbox provider must be enabled")
-        factories = {"gptmail": GptMailProvider, "tempmail_lol": TempMailLolProvider, "cloudflare_temp_email": CloudflareTempMailProvider, "outlook_token": OutlookTokenProvider}
+        factories = {"gptmail": GptMailProvider, "tempmail_lol": TempMailLolProvider, "cloudflare_temp_email": CloudflareTempMailProvider, "outlook_token": OutlookTokenProvider, "remail": RemailProvider}
         self._providers: list[_MailboxProvider] = []
         unsupported: list[str] = []
         for entry in enabled:
@@ -1367,4 +1603,4 @@ def extract_verification_code(content: str) -> str | None:
     return numeric.group(1) if numeric else None
 
 
-__all__ = ["MAILBOX_EXHAUSTED_EXIT_CODE", "Mailbox", "MailboxPool", "MailboxRateLimited", "MailboxUnavailableError", "CloudflareTempMailProvider", "OutlookTokenError", "OutlookTokenProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]
+__all__ = ["MAILBOX_EXHAUSTED_EXIT_CODE", "Mailbox", "MailboxPool", "MailboxRateLimited", "MailboxUnavailableError", "CloudflareTempMailProvider", "OutlookTokenError", "OutlookTokenProvider", "RemailProvider", "TempMailLolProvider", "VerificationCodeTimeout", "expand_outlook_aliases", "extract_verification_code", "outlook_pool_entries", "outlook_pool_stats", "parse_outlook_credentials", "remove_outlook_invalid_credentials", "reset_outlook_pool_state"]

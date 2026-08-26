@@ -169,6 +169,39 @@ class RegistrationManager:
         data["cpa"] = cpa
         return data
 
+    def remail_projects(
+        self,
+        *,
+        provider_id: str = "",
+        api_base: str = "",
+        api_key: str = "",
+    ) -> dict[str, Any]:
+        """Read the Remail project catalogue without persisting request secrets.
+
+        A saved provider can reuse its masked token by id.  For a new unsaved
+        provider, the administrator supplies the token only in this request.
+        The Remail call follows the registration mailbox API proxy setting.
+        """
+        settings = self._read_settings_raw()
+        saved_provider: dict[str, Any] = {}
+        expected_id = str(provider_id or "").strip()
+        if expected_id:
+            for item in (settings.get("mail") or {}).get("providers") or []:
+                if isinstance(item, dict) and str(item.get("id") or "") == expected_id:
+                    saved_provider = item
+                    break
+
+        base_url = str(api_base or saved_provider.get("api_base") or "https://remail.aishop6.com").strip()
+        secret = str(api_key or saved_provider.get("api_key") or "").strip()
+        if not secret:
+            raise ValueError("请先填写 Remail API Token，或先保存已配置的 Remail 服务商")
+
+        from .mail import RemailProvider
+
+        proxy = str(settings.get("proxy") or "").strip()
+        projects = RemailProvider.list_projects(base_url, secret, proxy)
+        return {"projects": projects, "count": len(projects)}
+
     def save_settings(self, raw: dict[str, Any]) -> dict[str, Any]:
         existing = self._read_settings_raw()
         incoming = _deep_merge(_DEFAULT_SETTINGS, raw)
@@ -192,6 +225,7 @@ class RegistrationManager:
                 "tempmail_lol": "TempMail.lol",
                 "cloudflare_temp_email": "Cloudflare 临时邮箱",
                 "outlook_token": "Microsoft 邮箱凭据池",
+                "remail": "Remail 接码邮箱",
             }.get(item["type"], "GptMail")
             item["name"] = str(item.get("name") or f"{default_name} {index + 1}").strip()[:80]
             item["enabled"] = bool(item.get("enabled", True))
@@ -213,6 +247,8 @@ class RegistrationManager:
                 # Clear it so validation reports the missing GptMail settings
                 # instead of failing later with a misleading JSON parse error.
                 item["api_base"] = ""
+            elif item["type"] == "remail" and not item["api_base"]:
+                item["api_base"] = "https://remail.aishop6.com"
             raw_domains = item.get("domains", item.get("domain", []))
             if isinstance(raw_domains, str):
                 raw_domains = [part.strip() for part in raw_domains.split(",")]
@@ -236,8 +272,21 @@ class RegistrationManager:
                 item.pop("api_key_configured", None)
                 item.pop("admin_password", None)
                 item.pop("admin_password_configured", None)
-            if item["type"] not in {"gptmail", "tempmail_lol", "cloudflare_temp_email", "outlook_token"}:
-                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol, cloudflare_temp_email, outlook_token")
+            if item["type"] not in {"gptmail", "tempmail_lol", "cloudflare_temp_email", "outlook_token", "remail"}:
+                raise ValueError("Supported mailbox provider types: gptmail, tempmail_lol, cloudflare_temp_email, outlook_token, remail")
+            if item["type"] == "remail":
+                try:
+                    item["project_id"] = max(0, int(item.get("project_id") or 0))
+                except (TypeError, ValueError):
+                    item["project_id"] = 0
+                item["email_suffix"] = str(item.get("email_suffix") or "").strip().lower()
+                item["supply"] = str(item.get("supply") or "private_first").strip().lower()
+                if item["supply"] not in {"private_first", "public_only"}:
+                    item["supply"] = "private_first"
+            else:
+                item.pop("project_id", None)
+                item.pop("email_suffix", None)
+                item.pop("supply", None)
             mailbox_text = str(item.get("mailboxes") or "")
             old_mailboxes = str(old_by_id.get(item["id"], {}).get("mailboxes") or "")
             if item["type"] == "outlook_token":
@@ -437,6 +486,13 @@ class RegistrationManager:
         ]
         if invalid_gptmail:
             raise RuntimeError("\u5df2\u542f\u7528\u7684 GptMail \u670d\u52a1\u5546\u5fc5\u987b\u914d\u7f6e API URL \u548c API Key")
+        invalid_remail = [
+            item for item in providers
+            if str(item.get("type") or "").strip().lower() == "remail"
+            and (not item.get("api_base") or not item.get("api_key") or int(item.get("project_id") or 0) <= 0 or not str(item.get("email_suffix") or "").strip())
+        ]
+        if invalid_remail:
+            raise RuntimeError("\u5df2\u542f\u7528\u7684 Remail \u670d\u52a1\u5546\u5fc5\u987b\u914d\u7f6e API URL\u3001API Token\u3001\u9879\u76ee ID \u548c\u90ae\u7bb1\u540e\u7f00")
         return providers
 
     async def _launch_registration_locked(

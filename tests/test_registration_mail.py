@@ -1,10 +1,11 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.control.registration.mail import (
-    CloudflareTempMailProvider, MailboxPool, MailboxRateLimited, OutlookTokenError, OutlookTokenProvider, TempMailLolProvider, expand_outlook_aliases,
+    CloudflareTempMailProvider, MailboxPool, MailboxRateLimited, OutlookTokenError, OutlookTokenProvider, RemailProvider, TempMailLolProvider, expand_outlook_aliases,
     extract_verification_code, outlook_pool_stats, parse_outlook_credentials,
     remove_outlook_invalid_credentials, reset_outlook_pool_state,
 )
@@ -108,6 +109,100 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
         self.assertEqual(messages[0]["id"], "message-id-camelcase")
         self.assertEqual(extract_verification_code(messages[0]["content"]), "ABC-123")
         provider.close()
+
+
+class RemailProviderTests(unittest.TestCase):
+    def test_create_code_order_and_poll_verification_code(self) -> None:
+        provider = RemailProvider({
+            "name": "Remail",
+            "type": "remail",
+            "api_base": "https://remail.example.test",
+            "api_key": "rk-test-key",
+            "project_id": 42,
+            "email_suffix": "outlook.com",
+            "supply": "private_first",
+        })
+        provider._request = Mock(side_effect=[
+            {"orderNo": "R20260826001", "deliveryEmail": "person@outlook.com", "status": "active"},
+            {"orderNo": "R20260826001", "status": "active", "verificationCode": "L3K-YY9", "lastMailReceivedAt": "2026-08-26T12:00:00Z"},
+        ])
+
+        created = provider.create_mailbox()
+        self.assertEqual(created["address"], "person@outlook.com")
+        self.assertEqual(json.loads(created["token"]), {"order_no": "R20260826001"})
+        create_call = provider._request.call_args_list[0]
+        self.assertEqual(create_call.args[:2], ("POST", "/v1/open/orders"))
+        self.assertEqual(create_call.kwargs["params"], {"serviceMode": "code", "supply": "private_first"})
+        self.assertEqual(create_call.kwargs["payload"], {"projectId": 42, "emailSuffix": "outlook.com"})
+        self.assertIn("Idempotency-Key", create_call.kwargs["headers"])
+
+        messages = provider.list_messages(created["address"], created["token"])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("L3K-YY9", messages[0]["content"])
+        self.assertEqual(provider._request.call_args_list[1].args[:2], ("GET", "/v1/open/orders/R20260826001"))
+        provider.close()
+
+    def test_order_without_code_is_not_treated_as_a_historical_message(self) -> None:
+        provider = RemailProvider({
+            "type": "remail", "api_key": "rk-test-key", "project_id": 42, "email_suffix": "outlook.com",
+        })
+        provider._request = Mock(return_value={"orderNo": "R20260826002", "status": "active", "verificationCode": ""})
+        self.assertEqual(provider.list_messages("person@outlook.com", json.dumps({"order_no": "R20260826002"})), [])
+        provider.close()
+
+    def test_list_projects_keeps_only_code_enabled_suffixes(self) -> None:
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "items": [
+                {"id": 9, "name": "Ignored", "products": [{"status": "disabled", "codeEnabled": True, "suffixes": [{"suffix": "ignored.example", "totalAvailable": 99}]}]},
+                {"id": 3, "name": "Public code", "products": [
+                    {"status": "enabled", "codeEnabled": False, "suffixes": [{"suffix": "no-code.example", "totalAvailable": 88}]},
+                    {"status": "enabled", "codeEnabled": True, "suffixes": [
+                        {"suffix": "Outlook.com", "totalAvailable": 7, "publicAvailable": 4},
+                        {"suffix": "hotmail.com", "totalAvailable": "2", "publicAvailable": "2"},
+                    ]},
+                ]},
+                {"id": 4, "name": "Private code", "products": [{"status": "enabled", "codeEnabled": True, "suffixes": [{"suffix": "outlook.com", "totalAvailable": 11, "publicAvailable": 0}]}]},
+                {"id": 5, "name": "No suffix", "products": [{"status": "enabled", "codeEnabled": True, "suffixes": []}]},
+            ]
+        }
+        session = Mock()
+        session.get.return_value = response
+        with patch("app.control.registration.mail._create_session", return_value=session) as create_session:
+            projects = RemailProvider.list_projects("https://remail.example.test/", "rk-test-key", "http://proxy:8080")
+
+        self.assertEqual([item["id"] for item in projects], [4, 3])
+        self.assertEqual(projects[0]["suffixes"], [{"suffix": "outlook.com", "total_available": 11, "public_available": 0}])
+        self.assertEqual(projects[1]["suffixes"], [
+            {"suffix": "outlook.com", "total_available": 7, "public_available": 4},
+            {"suffix": "hotmail.com", "total_available": 2, "public_available": 2},
+        ])
+        create_session.assert_called_once_with("http://proxy:8080")
+        self.assertEqual(session.get.call_args.args[0], "https://remail.example.test/v1/projects")
+        self.assertEqual(session.get.call_args.kwargs["params"], {"scope": "visible", "status": "listed", "offset": 0, "limit": 100})
+        self.assertEqual(session.get.call_args.kwargs["headers"]["Authorization"], "Bearer rk-test-key")
+        session.close.assert_called_once()
+
+    def test_list_projects_reads_all_offset_pages(self) -> None:
+        def project(project_id: int) -> dict:
+            return {
+                "id": project_id,
+                "name": f"Project {project_id}",
+                "products": [{"status": "enabled", "codeEnabled": True, "suffixes": [{"suffix": "outlook.com", "totalAvailable": project_id, "publicAvailable": project_id}]}],
+            }
+
+        first = Mock(status_code=200)
+        first.json.return_value = {"items": [project(index) for index in range(1, 101)], "total": 101, "offset": 0, "limit": 100}
+        second = Mock(status_code=200)
+        second.json.return_value = {"items": [project(101)], "total": 101, "offset": 100, "limit": 100}
+        session = Mock()
+        session.get.side_effect = [first, second]
+        with patch("app.control.registration.mail._create_session", return_value=session):
+            projects = RemailProvider.list_projects("https://remail.example.test", "rk-test-key")
+
+        self.assertEqual(len(projects), 101)
+        self.assertEqual([call.kwargs["params"]["offset"] for call in session.get.call_args_list], [0, 100])
+        session.close.assert_called_once()
 
 
 class TempMailLolProviderTests(unittest.TestCase):
@@ -363,6 +458,29 @@ class RegistrationMailboxSettingsTests(unittest.TestCase):
             self.assertEqual(provider["alias_prefix"], "tag")
             self.assertEqual(provider["mailboxes_base_count"], 2)
             self.assertEqual(provider["mailboxes_count"], 2)
+
+    def test_remail_settings_keep_api_key_masked_and_preserve_order_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class _Manager(RegistrationManager):
+                @property
+                def _dir(self) -> Path:
+                    path = Path(tmp)
+                    path.mkdir(parents=True, exist_ok=True)
+                    return path
+
+            manager = _Manager()
+            saved = manager.save_settings({"mail": {"providers": [{
+                "id": "remail", "type": "remail", "enabled": True,
+                "api_key": "rk-secret", "project_id": "42", "email_suffix": "Outlook.com", "supply": "public_only",
+            }]}})
+            provider = saved["mail"]["providers"][0]
+            self.assertEqual(provider["api_base"], "https://remail.aishop6.com")
+            self.assertEqual(provider["api_key"], "")
+            self.assertTrue(provider["api_key_configured"])
+            self.assertEqual(provider["project_id"], 42)
+            self.assertEqual(provider["email_suffix"], "outlook.com")
+            self.assertEqual(provider["supply"], "public_only")
+            self.assertEqual(manager._read_settings_raw()["mail"]["providers"][0]["api_key"], "rk-secret")
 
     def test_microsoft_pool_import_merges_by_email_without_returning_secret(self) -> None:
         first = "owner@outlook.com----password----client-a----refresh-a"

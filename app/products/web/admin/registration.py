@@ -38,6 +38,12 @@ class RegistrationSettingsRequest(RootModel[dict[str, Any]]):
     pass
 
 
+class RemailProjectsRequest(BaseModel):
+    provider_id: str = Field(default="", max_length=128)
+    api_base: str = Field(default="", max_length=1_024)
+    api_key: str = Field(default="", max_length=4_096)
+
+
 class RegistrationArchiveItem(BaseModel):
     token: str = Field(min_length=1)
     email: str = ""
@@ -207,6 +213,20 @@ async def save_registration_config(req: RegistrationSettingsRequest, request: Re
     try:
         return _manager(request).save_settings(req.root)
     except ValueError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/remail/projects")
+async def list_remail_projects(req: RemailProjectsRequest, request: Request):
+    """Load selectable Remail projects and email suffixes for one provider card."""
+    try:
+        return await asyncio.to_thread(
+            _manager(request).remail_projects,
+            provider_id=req.provider_id,
+            api_base=req.api_base,
+            api_key=req.api_key,
+        )
+    except (RuntimeError, ValueError) as exc:
         raise _error(exc) from exc
 
 
